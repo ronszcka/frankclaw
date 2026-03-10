@@ -386,9 +386,23 @@ fn validate_channel_config(channel_id: &ChannelId, channel: &ChannelConfig) -> R
             &["bot_token", "token"],
             &["bot_token_env", "token_env"],
         ),
+        "slack" => {
+            validate_channel_secret_source(
+                channel,
+                "slack",
+                &["app_token"],
+                &["app_token_env"],
+            )?;
+            validate_channel_secret_source(
+                channel,
+                "slack",
+                &["bot_token", "token"],
+                &["bot_token_env", "token_env"],
+            )
+        }
         other => Err(FrankClawError::ConfigValidation {
             msg: format!(
-                "unsupported enabled channel '{}'; currently supported: web, telegram, discord",
+                "unsupported enabled channel '{}'; currently supported: web, telegram, discord, slack",
                 other
             ),
         }),
@@ -689,11 +703,28 @@ mod tests {
     fn unsupported_enabled_channel_fails_validation() {
         let mut config = FrankClawConfig::default();
         config.channels.insert(
-            ChannelId::new("slack"),
+            ChannelId::new("mattermost"),
             ChannelConfig {
                 enabled: true,
                 accounts: vec![serde_json::json!({
                     "bot_token": "test-token"
+                })],
+                extra: serde_json::json!({}),
+            },
+        );
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn slack_channel_requires_app_and_bot_tokens() {
+        let mut config = FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("slack"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "bot_token": "xoxb-test"
                 })],
                 extra: serde_json::json!({}),
             },

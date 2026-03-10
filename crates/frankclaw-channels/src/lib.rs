@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod discord;
+pub mod slack;
 pub mod telegram;
 pub mod web;
 
@@ -108,9 +109,33 @@ fn build_channel(channel_id: &ChannelId, channel_config: &ChannelConfig) -> Resu
                 discord::DiscordChannel::new(bot_token),
             )))
         }
+        "slack" => {
+            let account = channel_config.accounts.first().ok_or_else(|| {
+                FrankClawError::ConfigValidation {
+                    msg: "slack channel requires at least one account".into(),
+                }
+            })?;
+            let app_token = resolve_channel_secret(
+                account,
+                &["app_token"],
+                &["app_token_env"],
+                "SLACK_APP_TOKEN",
+                "slack",
+            )?;
+            let bot_token = resolve_channel_secret(
+                account,
+                &["bot_token", "token"],
+                &["bot_token_env", "token_env"],
+                "SLACK_BOT_TOKEN",
+                "slack",
+            )?;
+            Ok(LoadedChannel::Standard(Arc::new(
+                slack::SlackChannel::new(app_token, bot_token),
+            )))
+        }
         other => Err(FrankClawError::ConfigValidation {
             msg: format!(
-                "unsupported enabled channel '{}'; currently supported: web, telegram, discord",
+                "unsupported enabled channel '{}'; currently supported: web, telegram, discord, slack",
                 other
             ),
         }),
@@ -229,5 +254,27 @@ mod tests {
             .get(&ChannelId::new("discord"))
             .expect("discord channel should exist");
         assert_eq!(channel.label(), "Discord");
+    }
+
+    #[test]
+    fn load_from_config_builds_slack_from_inline_tokens() {
+        let mut config = FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("slack"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "app_token": "xapp-test",
+                    "bot_token": "xoxb-test"
+                })],
+                extra: serde_json::json!({}),
+            },
+        );
+
+        let channels = load_from_config(&config).expect("channels should load");
+        let channel = channels
+            .get(&ChannelId::new("slack"))
+            .expect("slack channel should exist");
+        assert_eq!(channel.label(), "Slack");
     }
 }

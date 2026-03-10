@@ -1,0 +1,433 @@
+use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
+use reqwest::Client;
+use secrecy::{ExposeSecret, SecretString};
+use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{info, warn};
+
+use frankclaw_core::channel::*;
+use frankclaw_core::error::{FrankClawError, Result};
+use frankclaw_core::types::ChannelId;
+
+const SLACK_API_BASE: &str = "https://slack.com/api";
+
+pub struct SlackChannel {
+    app_token: SecretString,
+    bot_token: SecretString,
+    client: Client,
+    bot_user_id: Mutex<Option<String>>,
+}
+
+impl SlackChannel {
+    pub fn new(app_token: SecretString, bot_token: SecretString) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self {
+            app_token,
+            bot_token,
+            client,
+            bot_user_id: Mutex::new(None),
+        }
+    }
+
+    fn app_auth_header(&self) -> String {
+        format!("Bearer {}", self.app_token.expose_secret())
+    }
+
+    fn bot_auth_header(&self) -> String {
+        format!("Bearer {}", self.bot_token.expose_secret())
+    }
+
+    async fn socket_mode_url(&self) -> Result<String> {
+        let resp = self
+            .client
+            .post(format!("{SLACK_API_BASE}/apps.connections.open"))
+            .header("authorization", self.app_auth_header())
+            .send()
+            .await
+            .map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("socket mode connection open failed: {e}"),
+            })?;
+
+        let body: serde_json::Value = resp.json().await.map_err(|e| FrankClawError::Channel {
+            channel: self.id(),
+            msg: format!("invalid socket mode response: {e}"),
+        })?;
+        if body["ok"].as_bool() != Some(true) {
+            return Err(FrankClawError::Channel {
+                channel: self.id(),
+                msg: body["error"]
+                    .as_str()
+                    .unwrap_or("slack socket mode request failed")
+                    .to_string(),
+            });
+        }
+
+        body["url"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| FrankClawError::Channel {
+                channel: self.id(),
+                msg: "slack socket mode response missing url".into(),
+            })
+    }
+
+    async fn populate_bot_user_id(&self) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{SLACK_API_BASE}/auth.test"))
+            .header("authorization", self.bot_auth_header())
+            .send()
+            .await
+            .map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("slack auth test failed: {e}"),
+            })?;
+
+        let body: serde_json::Value = resp.json().await.map_err(|e| FrankClawError::Channel {
+            channel: self.id(),
+            msg: format!("invalid slack auth test response: {e}"),
+        })?;
+        if body["ok"].as_bool() != Some(true) {
+            return Err(FrankClawError::Channel {
+                channel: self.id(),
+                msg: body["error"]
+                    .as_str()
+                    .unwrap_or("slack auth test failed")
+                    .to_string(),
+            });
+        }
+
+        *self.bot_user_id.lock().await = body["user_id"].as_str().map(str::to_string);
+        Ok(())
+    }
+
+    async fn run_socket_mode(
+        &self,
+        inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
+    ) -> Result<()> {
+        self.populate_bot_user_id().await?;
+        let socket_url = self.socket_mode_url().await?;
+        let (socket, _) = tokio_tungstenite::connect_async(socket_url)
+            .await
+            .map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("slack socket mode connect failed: {e}"),
+            })?;
+        let (mut ws_tx, mut ws_rx) = socket.split();
+
+        while let Some(frame) = ws_rx.next().await {
+            let frame = frame.map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("slack socket mode read failed: {e}"),
+            })?;
+            let payload = parse_socket_frame(self.id(), frame)?;
+
+            if let Some(envelope_id) = payload["envelope_id"].as_str() {
+                ws_tx
+                    .send(Message::Text(
+                        serde_json::json!({ "envelope_id": envelope_id })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .map_err(|e| FrankClawError::Channel {
+                        channel: self.id(),
+                        msg: format!("slack socket mode ack failed: {e}"),
+                    })?;
+            }
+
+            if payload["type"].as_str() != Some("events_api") {
+                continue;
+            }
+
+            let bot_user_id = self.bot_user_id.lock().await.clone();
+            if let Some(inbound) = parse_event_message(&payload["payload"]["event"], bot_user_id.as_deref()) {
+                if inbound_tx.send(inbound).await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(FrankClawError::Channel {
+            channel: self.id(),
+            msg: "slack socket mode closed".into(),
+        })
+    }
+}
+
+#[async_trait]
+impl ChannelPlugin for SlackChannel {
+    fn id(&self) -> ChannelId {
+        ChannelId::new("slack")
+    }
+
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities {
+            threads: true,
+            groups: true,
+            attachments: false,
+            edit: false,
+            delete: false,
+            reactions: false,
+            streaming: false,
+            inline_buttons: false,
+            ..Default::default()
+        }
+    }
+
+    fn label(&self) -> &str {
+        "Slack"
+    }
+
+    async fn start(
+        &self,
+        inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
+    ) -> Result<()> {
+        info!("slack channel starting (socket mode)");
+        loop {
+            match self.run_socket_mode(inbound_tx.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    warn!(error = %err, "slack socket mode error, retrying in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    async fn stop(&self) -> Result<()> {
+        info!("slack channel stopped");
+        Ok(())
+    }
+
+    async fn health(&self) -> HealthStatus {
+        match self
+            .client
+            .post(format!("{SLACK_API_BASE}/auth.test"))
+            .header("authorization", self.bot_auth_header())
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => HealthStatus::Connected,
+            Ok(resp) => HealthStatus::Degraded {
+                reason: format!("HTTP {}", resp.status()),
+            },
+            Err(e) => HealthStatus::Disconnected {
+                reason: e.to_string(),
+            },
+        }
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<SendResult> {
+        let resp = self
+            .client
+            .post(format!("{SLACK_API_BASE}/chat.postMessage"))
+            .header("authorization", self.bot_auth_header())
+            .json(&build_send_body(&msg))
+            .send()
+            .await
+            .map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("slack send failed: {e}"),
+            })?;
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            return Ok(SendResult::RateLimited {
+                retry_after_secs: retry_after,
+            });
+        }
+
+        let body: serde_json::Value = resp.json().await.map_err(|e| FrankClawError::Channel {
+            channel: self.id(),
+            msg: format!("invalid slack send response: {e}"),
+        })?;
+        if body["ok"].as_bool() == Some(true) {
+            Ok(SendResult::Sent {
+                platform_message_id: body["ts"].as_str().unwrap_or_default().to_string(),
+            })
+        } else {
+            Ok(SendResult::Failed {
+                reason: body["error"]
+                    .as_str()
+                    .unwrap_or("unknown slack send failure")
+                    .to_string(),
+            })
+        }
+    }
+}
+
+fn parse_socket_frame(channel_id: ChannelId, frame: Message) -> Result<serde_json::Value> {
+    let text = match frame {
+        Message::Text(text) => text,
+        Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|e| FrankClawError::Channel {
+                channel: channel_id.clone(),
+                msg: format!("slack socket mode sent invalid UTF-8: {e}"),
+            })?
+            .into(),
+        Message::Close(_) => {
+            return Err(FrankClawError::Channel {
+                channel: channel_id,
+                msg: "slack socket mode closed".into(),
+            });
+        }
+        _ => {
+            return Err(FrankClawError::Channel {
+                channel: channel_id,
+                msg: "slack socket mode sent unexpected frame type".into(),
+            });
+        }
+    };
+
+    serde_json::from_str(text.as_ref()).map_err(|e| FrankClawError::Channel {
+        channel: channel_id,
+        msg: format!("slack socket mode sent invalid JSON: {e}"),
+    })
+}
+
+fn parse_event_message(event: &serde_json::Value, bot_user_id: Option<&str>) -> Option<InboundMessage> {
+    if event["type"].as_str() != Some("message") {
+        return None;
+    }
+    if event["subtype"].is_string() || event["bot_id"].is_string() {
+        return None;
+    }
+
+    let channel_id = event["channel"].as_str()?.to_string();
+    let sender_id = event["user"].as_str()?.to_string();
+    let text = event["text"].as_str().map(str::to_string);
+    let thread_target = encode_thread_target(&channel_id, event["thread_ts"].as_str());
+    let channel_type = event["channel_type"].as_str().unwrap_or("channel");
+    let is_group = channel_type != "im";
+    let is_mention = bot_user_id
+        .map(|user_id| {
+            text.as_deref()
+                .map(|text| text.contains(&format!("<@{user_id}>")))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let timestamp = event["ts"]
+        .as_str()
+        .and_then(parse_slack_timestamp)
+        .unwrap_or_else(chrono::Utc::now);
+
+    Some(InboundMessage {
+        channel: ChannelId::new("slack"),
+        account_id: "default".to_string(),
+        sender_id,
+        sender_name: None,
+        thread_id: Some(thread_target),
+        is_group,
+        is_mention,
+        text,
+        attachments: Vec::new(),
+        platform_message_id: event["ts"].as_str().map(str::to_string),
+        timestamp,
+    })
+}
+
+fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
+    let (channel, thread_ts) = parse_thread_target(msg.thread_id.as_deref(), &msg.to);
+    let mut body = serde_json::json!({
+        "channel": channel,
+        "text": msg.text,
+        "reply_broadcast": false,
+    });
+    if let Some(thread_ts) = thread_ts {
+        body["thread_ts"] = serde_json::json!(thread_ts);
+    }
+    body
+}
+
+fn encode_thread_target(channel_id: &str, thread_ts: Option<&str>) -> String {
+    match thread_ts {
+        Some(thread_ts) => format!("{channel_id}:thread:{thread_ts}"),
+        None => channel_id.to_string(),
+    }
+}
+
+fn parse_thread_target(thread_id: Option<&str>, fallback_to: &str) -> (String, Option<String>) {
+    let raw = thread_id.unwrap_or(fallback_to);
+    if let Some((channel_id, thread_ts)) = raw.split_once(":thread:") {
+        return (channel_id.to_string(), Some(thread_ts.to_string()));
+    }
+    (raw.to_string(), None)
+}
+
+fn parse_slack_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let seconds = value.split('.').next()?.parse::<i64>().ok()?;
+    chrono::DateTime::from_timestamp(seconds, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_event_message_detects_group_mentions_and_threads() {
+        let inbound = parse_event_message(
+            &serde_json::json!({
+                "type": "message",
+                "channel": "C123",
+                "channel_type": "channel",
+                "user": "U123",
+                "text": "<@UBOT> hello",
+                "ts": "1710000000.123456",
+                "thread_ts": "1710000000.000001"
+            }),
+            Some("UBOT"),
+        )
+        .expect("message should parse");
+
+        assert!(inbound.is_group);
+        assert!(inbound.is_mention);
+        assert_eq!(
+            inbound.thread_id.as_deref(),
+            Some("C123:thread:1710000000.000001")
+        );
+    }
+
+    #[test]
+    fn parse_event_message_skips_bot_messages() {
+        let inbound = parse_event_message(
+            &serde_json::json!({
+                "type": "message",
+                "channel": "C123",
+                "user": "U123",
+                "bot_id": "B123",
+                "text": "hello",
+                "ts": "1710000000.123456"
+            }),
+            Some("UBOT"),
+        );
+
+        assert!(inbound.is_none());
+    }
+
+    #[test]
+    fn build_send_body_includes_thread_ts_when_target_is_thread() {
+        let body = build_send_body(&OutboundMessage {
+            channel: ChannelId::new("slack"),
+            account_id: "default".into(),
+            to: "C123".into(),
+            thread_id: Some("C123:thread:1710000000.000001".into()),
+            text: "hello".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        });
+
+        assert_eq!(body["channel"], serde_json::json!("C123"));
+        assert_eq!(body["thread_ts"], serde_json::json!("1710000000.000001"));
+    }
+}
