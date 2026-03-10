@@ -18,7 +18,7 @@ use tower_http::{
 };
 use tracing::info;
 
-use frankclaw_core::channel::{InboundMessage, OutboundMessage, SendResult};
+use frankclaw_core::channel::{InboundMessage, OutboundMessage};
 use frankclaw_core::config::{BindMode, ChannelDmPolicy, FrankClawConfig};
 use frankclaw_core::session::SessionStore;
 use frankclaw_cron::{CronJob, CronService};
@@ -27,12 +27,11 @@ use frankclaw_sessions::SqliteSessionStore;
 
 use crate::auth::{authenticate, validate_bind_auth, AuthCredential};
 use crate::audit::{log_event, log_failure};
+use crate::delivery::{DeliveryRecord, deliver_outbound_message};
 use crate::pairing::PairingStore;
 use crate::rate_limit::AuthRateLimiter;
 use crate::state::GatewayState;
 
-const MAX_OUTBOUND_ATTEMPTS: usize = 3;
-const MAX_RETRY_DELAY_SECS: u64 = 30;
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 15 * 60;
 
 /// Build and start the gateway server.
@@ -554,118 +553,6 @@ async fn process_inbound_message(
     Ok(())
 }
 
-#[derive(Clone)]
-struct DeliveryRecord {
-    status: &'static str,
-    platform_message_id: Option<String>,
-    attempts: usize,
-    retry_after_secs: Option<u64>,
-    error: Option<String>,
-}
-
-async fn deliver_outbound_message(
-    channel: Arc<dyn frankclaw_core::channel::ChannelPlugin>,
-    outbound: OutboundMessage,
-) -> frankclaw_core::error::Result<DeliveryRecord> {
-    let mut attempts = 0usize;
-    let mut last_retry_after = None;
-
-    loop {
-        attempts += 1;
-        match channel.send(outbound.clone()).await {
-            Ok(SendResult::Sent { platform_message_id }) => {
-                log_event(
-                    "channel.send",
-                    "success",
-                    serde_json::json!({
-                        "channel": outbound.channel.as_str(),
-                        "account_id": outbound.account_id,
-                        "recipient": outbound.to,
-                        "attempts": attempts,
-                        "platform_message_id": platform_message_id,
-                    }),
-                );
-                return Ok(DeliveryRecord {
-                    status: "sent",
-                    platform_message_id: Some(platform_message_id),
-                    attempts,
-                    retry_after_secs: last_retry_after,
-                    error: None,
-                });
-            }
-            Ok(SendResult::RateLimited { retry_after_secs }) => {
-                last_retry_after = retry_after_secs;
-                if attempts >= MAX_OUTBOUND_ATTEMPTS {
-                    log_failure(
-                        "channel.send",
-                        serde_json::json!({
-                            "channel": outbound.channel.as_str(),
-                            "account_id": outbound.account_id,
-                            "recipient": outbound.to,
-                            "attempts": attempts,
-                            "reason": "rate_limited",
-                            "retry_after_secs": retry_after_secs,
-                        }),
-                    );
-                    return Ok(DeliveryRecord {
-                        status: "rate_limited",
-                        platform_message_id: None,
-                        attempts,
-                        retry_after_secs,
-                        error: Some("rate limited".to_string()),
-                    });
-                }
-
-                let delay_secs = retry_after_secs
-                    .unwrap_or(attempts as u64)
-                    .clamp(1, MAX_RETRY_DELAY_SECS);
-                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-            }
-            Ok(SendResult::Failed { reason }) => {
-                if attempts >= MAX_OUTBOUND_ATTEMPTS {
-                    log_failure(
-                        "channel.send",
-                        serde_json::json!({
-                            "channel": outbound.channel.as_str(),
-                            "account_id": outbound.account_id,
-                            "recipient": outbound.to,
-                            "attempts": attempts,
-                            "reason": reason,
-                        }),
-                    );
-                    return Ok(DeliveryRecord {
-                        status: "failed",
-                        platform_message_id: None,
-                        attempts,
-                        retry_after_secs: None,
-                        error: Some(reason),
-                    });
-                }
-
-                tokio::time::sleep(std::time::Duration::from_secs(attempts as u64)).await;
-            }
-            Err(err) => {
-                if attempts >= MAX_OUTBOUND_ATTEMPTS {
-                    let error_text = err.to_string();
-                    log_failure(
-                        "channel.send",
-                        serde_json::json!({
-                            "channel": outbound.channel.as_str(),
-                            "account_id": outbound.account_id,
-                            "recipient": outbound.to,
-                            "attempts": attempts,
-                            "reason": error_text,
-                        }),
-                    );
-                    return Err(err);
-                }
-
-                tokio::time::sleep(std::time::Duration::from_secs(attempts as u64)).await;
-            }
-        }
-    }
-}
-
 async fn persist_delivery_metadata(
     sessions: &SqliteSessionStore,
     session_key: &frankclaw_core::types::SessionKey,
@@ -690,6 +577,14 @@ async fn persist_delivery_metadata(
             "attempts": delivery.attempts,
             "retry_after_secs": delivery.retry_after_secs,
             "error": delivery.error.clone(),
+            "chunks": delivery.chunks.iter().map(|chunk| serde_json::json!({
+                "content": chunk.text,
+                "platform_message_id": chunk.platform_message_id,
+                "status": chunk.status,
+                "attempts": chunk.attempts,
+                "retry_after_secs": chunk.retry_after_secs,
+                "error": chunk.error,
+            })).collect::<Vec<_>>(),
             "recorded_at": chrono::Utc::now(),
         }
     });
@@ -875,6 +770,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::http::{HeaderMap, HeaderValue};
     use frankclaw_channels::ChannelSet;
+    use frankclaw_core::channel::SendResult;
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::model::{
         CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,

@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod auth;
 pub mod broadcast;
+pub mod delivery;
 pub mod methods;
 pub mod pairing;
 pub mod rate_limit;
