@@ -854,12 +854,7 @@ mod tests {
 
         assert_eq!(outbound.attachments.len(), 1);
         assert_eq!(outbound.attachments[0].bytes, b"%PDF-1.4");
-        assert!(
-            outbound.attachments[0]
-                .filename
-                .as_deref()
-                .is_some_and(|value| value.ends_with(".pdf"))
-        );
+        assert_eq!(outbound.attachments[0].filename.as_deref(), Some("report.pdf"));
         assert_eq!(outbound.attachments[0].mime_type, "application/pdf");
         let expected_url = format!("/api/media/{}", stored.id);
         assert_eq!(outbound.attachments[0].url.as_deref(), Some(expected_url.as_str()));

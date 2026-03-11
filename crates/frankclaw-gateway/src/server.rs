@@ -1777,7 +1777,7 @@ mod tests {
         assert_eq!(download.status(), StatusCode::OK);
         assert_eq!(
             download.headers().get("content-type").and_then(|value| value.to_str().ok()),
-            Some("text/plain; charset=utf-8")
+            Some("text/plain")
         );
         let download_body = to_bytes(download.into_body(), usize::MAX)
             .await

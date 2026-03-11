@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use frankclaw_core::error::{FrankClawError, Result};
@@ -21,6 +22,12 @@ pub struct StoredMediaContent {
     pub bytes: Vec<u8>,
     pub mime_type: String,
     pub filename: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MediaMetadata {
+    original_name: String,
+    mime_type: String,
 }
 
 impl MediaStore {
@@ -61,23 +68,33 @@ impl MediaStore {
         let ext = mime_to_safe_extension(mime_type);
         let filename = format!("{id}.{ext}");
         let path = self.base_dir.join(&filename);
+        let metadata_path = metadata_path_for(&path);
+        let sanitized_name = sanitize_filename(original_name);
 
         std::fs::write(&path, data).map_err(|e| FrankClawError::Internal {
             msg: format!("failed to write media file: {e}"),
         })?;
+        write_metadata(
+            &metadata_path,
+            &MediaMetadata {
+                original_name: sanitized_name.clone(),
+                mime_type: mime_type.to_string(),
+            },
+        )?;
 
         // Set file permissions to owner-only (NOT 0o644 like OpenClaw).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(&path, perms);
+            let _ = std::fs::set_permissions(&path, perms.clone());
+            let _ = std::fs::set_permissions(&metadata_path, perms);
         }
 
         let now = Utc::now();
         Ok(MediaFile {
             id,
-            original_name: sanitize_filename(original_name),
+            original_name: sanitized_name,
             mime_type: mime_type.to_string(),
             size_bytes: data.len() as u64,
             path,
@@ -96,6 +113,9 @@ impl MediaStore {
         })?;
 
         for entry in entries.flatten() {
+            if is_metadata_path(&entry.path()) {
+                continue;
+            }
             if let Ok(metadata) = entry.metadata() {
                 if let Ok(modified) = metadata.modified() {
                     let age = std::time::SystemTime::now()
@@ -103,6 +123,7 @@ impl MediaStore {
                         .unwrap_or_default();
                     if age > std::time::Duration::from_secs(self.ttl_hours * 3600) {
                         if std::fs::remove_file(entry.path()).is_ok() {
+                            let _ = std::fs::remove_file(metadata_path_for(&entry.path()));
                             deleted += 1;
                         }
                     }
@@ -127,17 +148,28 @@ impl MediaStore {
         let bytes = std::fs::read(&path).map_err(|e| FrankClawError::Internal {
             msg: format!("failed to read media file: {e}"),
         })?;
-        let filename = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("media.bin")
-            .to_string();
-        let mime_type = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(mime_from_safe_extension)
-            .unwrap_or("application/octet-stream")
-            .to_string();
+        let metadata = read_metadata(&metadata_path_for(&path))?;
+        let filename = metadata
+            .as_ref()
+            .map(|value| value.original_name.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("media.bin")
+                    .to_string()
+            });
+        let mime_type = metadata
+            .as_ref()
+            .map(|value| value.mime_type.clone())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                path.extension()
+                    .and_then(|value| value.to_str())
+                    .map(mime_from_safe_extension)
+                    .unwrap_or("application/octet-stream")
+                    .to_string()
+            });
 
         Ok(Some(StoredMediaContent {
             bytes,
@@ -154,6 +186,9 @@ impl MediaStore {
 
         for entry in entries.flatten() {
             let path = entry.path();
+            if is_metadata_path(&path) {
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
                 continue;
             };
@@ -164,6 +199,42 @@ impl MediaStore {
 
         Ok(None)
     }
+}
+
+fn metadata_path_for(path: &std::path::Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("media.bin");
+    path.with_file_name(format!("{filename}.meta.json"))
+}
+
+fn is_metadata_path(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.ends_with(".meta.json"))
+}
+
+fn write_metadata(path: &std::path::Path, metadata: &MediaMetadata) -> Result<()> {
+    let bytes = serde_json::to_vec(metadata).map_err(|e| FrankClawError::Internal {
+        msg: format!("failed to serialize media metadata: {e}"),
+    })?;
+    std::fs::write(path, bytes).map_err(|e| FrankClawError::Internal {
+        msg: format!("failed to write media metadata: {e}"),
+    })
+}
+
+fn read_metadata(path: &std::path::Path) -> Result<Option<MediaMetadata>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|e| FrankClawError::Internal {
+        msg: format!("failed to read media metadata: {e}"),
+    })?;
+    let metadata = serde_json::from_slice(&bytes).map_err(|e| FrankClawError::Internal {
+        msg: format!("failed to parse media metadata: {e}"),
+    })?;
+    Ok(Some(metadata))
 }
 
 /// Map MIME type to a safe file extension.
@@ -257,7 +328,55 @@ mod tests {
             .expect("media read should succeed")
             .expect("media should exist");
         assert_eq!(loaded.bytes, b"hello");
+        assert_eq!(loaded.mime_type, "text/plain");
+        assert_eq!(loaded.filename, "note.txt");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn read_falls_back_when_metadata_sidecar_is_missing() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-media-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = MediaStore::new(temp_dir.clone(), 1024, 1).expect("store should create");
+        let media = store
+            .store("note.txt", "text/plain", b"hello")
+            .expect("media should store");
+        let metadata_path = metadata_path_for(&media.path);
+        std::fs::remove_file(&metadata_path).expect("metadata should delete");
+
+        let loaded = store
+            .read(&media.id)
+            .expect("media read should succeed")
+            .expect("media should exist");
+        assert_eq!(loaded.bytes, b"hello");
         assert_eq!(loaded.mime_type, "text/plain; charset=utf-8");
+        assert!(loaded.filename.ends_with(".txt"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn cleanup_removes_sidecar_metadata_with_media_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-media-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = MediaStore::new(temp_dir.clone(), 1024, 0).expect("store should create");
+        let media = store
+            .store("note.txt", "text/plain", b"hello")
+            .expect("media should store");
+        let metadata_path = metadata_path_for(&media.path);
+
+        assert!(media.path.exists());
+        assert!(metadata_path.exists());
+
+        let deleted = store.cleanup().expect("cleanup should succeed");
+        assert_eq!(deleted, 1);
+        assert!(!media.path.exists());
+        assert!(!metadata_path.exists());
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

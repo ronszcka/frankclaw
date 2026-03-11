@@ -824,6 +824,8 @@ dependencies = [
  "frankclaw-core",
  "frankclaw-crypto",
  "reqwest",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
