@@ -11,6 +11,7 @@ use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
 use crate::media_text::text_or_attachment_placeholder;
+use crate::outbound_media::{attachment_bytes, attachment_filename};
 use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
@@ -162,6 +163,119 @@ impl SlackChannel {
             msg: "slack socket mode closed".into(),
         })
     }
+
+    async fn send_with_attachments(&self, msg: &OutboundMessage) -> Result<SendResult> {
+        let (channel_id, thread_ts) = parse_thread_target(msg.thread_id.as_deref(), &msg.to);
+        let thread_ts = thread_ts.or_else(|| msg.reply_to.clone());
+        let mut files = Vec::with_capacity(msg.attachments.len());
+
+        for attachment in &msg.attachments {
+            let filename = attachment_filename(attachment);
+            let bytes = attachment_bytes(&self.id(), attachment)?;
+            let ticket_resp = self
+                .client
+                .post(format!("{SLACK_API_BASE}/files.getUploadURLExternal"))
+                .header("authorization", self.bot_auth_header())
+                .json(&build_upload_ticket_request(&filename, bytes.len()))
+                .send()
+                .await
+                .map_err(|e| FrankClawError::Channel {
+                    channel: self.id(),
+                    msg: format!("slack upload ticket request failed: {e}"),
+                })?;
+            let ticket: serde_json::Value = ticket_resp.json().await.map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("invalid slack upload ticket response: {e}"),
+            })?;
+            if ticket["ok"].as_bool() != Some(true) {
+                return Ok(SendResult::Failed {
+                    reason: ticket["error"]
+                        .as_str()
+                        .unwrap_or("unknown slack upload ticket failure")
+                        .to_string(),
+                });
+            }
+
+            let upload_url = ticket["upload_url"].as_str().ok_or_else(|| FrankClawError::Channel {
+                channel: self.id(),
+                msg: "slack upload ticket response missing upload_url".into(),
+            })?;
+            let file_id = ticket["file_id"].as_str().ok_or_else(|| FrankClawError::Channel {
+                channel: self.id(),
+                msg: "slack upload ticket response missing file_id".into(),
+            })?;
+            let upload_resp = self
+                .client
+                .post(upload_url)
+                .header("content-type", "application/octet-stream")
+                .body(bytes)
+                .send()
+                .await
+                .map_err(|e| FrankClawError::Channel {
+                    channel: self.id(),
+                    msg: format!("slack external upload failed: {e}"),
+                })?;
+            if !upload_resp.status().is_success() {
+                return Ok(SendResult::Failed {
+                    reason: format!("slack external upload returned HTTP {}", upload_resp.status()),
+                });
+            }
+
+            files.push(serde_json::json!({
+                "id": file_id,
+                "title": filename,
+            }));
+        }
+
+        let complete_resp = self
+            .client
+            .post(format!("{SLACK_API_BASE}/files.completeUploadExternal"))
+            .header("authorization", self.bot_auth_header())
+            .json(&build_complete_upload_request(
+                files,
+                &channel_id,
+                thread_ts.as_deref(),
+                &msg.text,
+            ))
+            .send()
+            .await
+            .map_err(|e| FrankClawError::Channel {
+                channel: self.id(),
+                msg: format!("slack complete upload failed: {e}"),
+            })?;
+
+        if complete_resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = complete_resp
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            return Ok(SendResult::RateLimited {
+                retry_after_secs: retry_after,
+            });
+        }
+
+        let complete_body: serde_json::Value = complete_resp.json().await.map_err(|e| FrankClawError::Channel {
+            channel: self.id(),
+            msg: format!("invalid slack complete upload response: {e}"),
+        })?;
+        if complete_body["ok"].as_bool() == Some(true) {
+            let platform_message_id = complete_body["files"]
+                .as_array()
+                .and_then(|files| files.first())
+                .and_then(|file| file["id"].as_str())
+                .unwrap_or("file-upload")
+                .to_string();
+            Ok(SendResult::Sent { platform_message_id })
+        } else {
+            Ok(SendResult::Failed {
+                reason: complete_body["error"]
+                    .as_str()
+                    .unwrap_or("unknown slack complete upload failure")
+                    .to_string(),
+            })
+        }
+    }
 }
 
 #[async_trait]
@@ -228,6 +342,9 @@ impl ChannelPlugin for SlackChannel {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<SendResult> {
+        if !msg.attachments.is_empty() {
+            return self.send_with_attachments(&msg).await;
+        }
         let resp = self
             .client
             .post(format!("{SLACK_API_BASE}/chat.postMessage"))
@@ -476,6 +593,33 @@ fn build_send_body(msg: &OutboundMessage) -> serde_json::Value {
     body
 }
 
+fn build_upload_ticket_request(filename: &str, length: usize) -> serde_json::Value {
+    serde_json::json!({
+        "filename": filename,
+        "length": length,
+    })
+}
+
+fn build_complete_upload_request(
+    files: Vec<serde_json::Value>,
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    initial_comment: &str,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "files": files,
+        "channel_id": channel_id,
+    });
+    let comment = normalize_outbound_text(initial_comment, OutboundTextFlavor::Plain);
+    if !comment.is_empty() {
+        body["initial_comment"] = serde_json::json!(comment);
+    }
+    if let Some(thread_ts) = thread_ts {
+        body["thread_ts"] = serde_json::json!(thread_ts);
+    }
+    body
+}
+
 fn build_edit_body(target: &EditMessageTarget, new_text: &str) -> serde_json::Value {
     let (channel, _) = parse_thread_target(target.thread_id.as_deref(), &target.to);
     let text = normalize_outbound_text(new_text, OutboundTextFlavor::Plain);
@@ -659,6 +803,35 @@ mod tests {
         });
 
         assert_eq!(body["text"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn build_upload_ticket_request_uses_filename_and_length() {
+        let body = build_upload_ticket_request("report.pdf", 2048);
+
+        assert_eq!(body["filename"], serde_json::json!("report.pdf"));
+        assert_eq!(body["length"], serde_json::json!(2048));
+    }
+
+    #[test]
+    fn build_complete_upload_request_uses_thread_and_comment() {
+        let body = build_complete_upload_request(
+            vec![serde_json::json!({
+                "id": "F123",
+                "title": "report.pdf",
+            })],
+            "C123",
+            Some("1710000000.123456"),
+            "\n attached \r\n",
+        );
+
+        assert_eq!(body["channel_id"], serde_json::json!("C123"));
+        assert_eq!(body["thread_ts"], serde_json::json!("1710000000.123456"));
+        assert_eq!(body["initial_comment"], serde_json::json!("attached"));
+        assert_eq!(
+            body["files"],
+            serde_json::json!([{ "id": "F123", "title": "report.pdf" }])
+        );
     }
 
     #[test]
