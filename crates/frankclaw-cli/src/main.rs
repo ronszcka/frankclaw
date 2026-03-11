@@ -58,6 +58,24 @@ enum Command {
     /// Show runtime and exposure status for the configured gateway.
     Status,
 
+    /// Generate a secure starter config for a chosen channel profile.
+    Onboard {
+        /// Starter channel profile: web, telegram, whatsapp, slack, discord, signal.
+        #[arg(long, default_value = "web")]
+        channel: String,
+
+        /// Force overwrite an existing config.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print a systemd unit for the current install.
+    InstallSystemd {
+        /// Optional explicit config path for ExecStart.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
     /// Send a message through the local runtime.
     MessageSend {
         /// Message text to send.
@@ -275,23 +293,11 @@ async fn main() -> anyhow::Result<()> {
             let config = load_config(cli.config.as_deref(), &state_dir)?;
             config.validate()?;
 
-            let mut warnings = Vec::new();
-            if config.models.providers.is_empty() {
-                warnings.push("no model providers configured");
-            }
-            if config.channels.is_empty() {
-                warnings.push("no channels configured");
-            }
-            if !config.security.encrypt_sessions {
-                warnings.push("session encryption is disabled");
-            }
-            if config.security.encrypt_sessions && load_master_key_from_env()?.is_none() {
-                warnings.push("session encryption is enabled but FRANKCLAW_MASTER_KEY is not set");
-            }
+            let warnings = collect_doctor_warnings(&config, &state_dir)?;
             let exposure = frankclaw_gateway::auth::assess_exposure(&config)?;
-            warnings.extend(exposure.warnings.iter().map(String::as_str));
 
             println!("Doctor check passed.");
+            println!("  Exposure: {}", exposure.summary);
             if warnings.is_empty() {
                 println!("  No obvious misconfigurations found.");
             } else {
@@ -332,6 +338,45 @@ async fn main() -> anyhow::Result<()> {
             for (channel_id, channel) in channels.channels() {
                 println!("  {}  {:?}", channel_id, channel.health().await);
             }
+        }
+
+        Command::Onboard { channel, force } => {
+            let config_path = cli
+                .config
+                .clone()
+                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
+            if config_path.exists() && !force {
+                anyhow::bail!(
+                    "config already exists at {}. Use --force to overwrite.",
+                    config_path.display()
+                );
+            }
+
+            let gateway_token = frankclaw_crypto::generate_token();
+            let config = build_onboard_config(&channel, &gateway_token)?;
+            let json = serde_json::to_string_pretty(&config)?;
+            std::fs::create_dir_all(config_path.parent().unwrap_or(&state_dir))?;
+            std::fs::write(&config_path, json)?;
+            restrict_file_permissions(&config_path);
+
+            println!("Starter config created at: {}", config_path.display());
+            println!("Gateway token: {gateway_token}");
+            println!();
+            println!("Next steps:");
+            println!("  1. Fill the provider env vars referenced in the config.");
+            println!("  2. If using channel-specific env vars, export those too.");
+            println!("  3. Start locally: frankclaw gateway --config {}", config_path.display());
+        }
+
+        Command::InstallSystemd { config } => {
+            let config_path = config
+                .or_else(|| cli.config.clone())
+                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
+            let executable = std::env::current_exe().context("failed to locate frankclaw binary")?;
+            println!(
+                "{}",
+                render_systemd_unit(&executable, &config_path, &state_dir)
+            );
         }
 
         Command::MessageSend {
@@ -622,14 +667,7 @@ async fn main() -> anyhow::Result<()> {
 
             std::fs::create_dir_all(config_path.parent().unwrap_or(&state_dir))?;
             std::fs::write(&config_path, &json)?;
-
-            // Restrict config file permissions.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o600);
-                let _ = std::fs::set_permissions(&config_path, perms);
-            }
+            restrict_file_permissions(&config_path);
 
             println!("Config created at: {}", config_path.display());
             println!();
@@ -672,12 +710,181 @@ fn load_config(
     Ok(config)
 }
 
+fn collect_doctor_warnings(
+    config: &frankclaw_core::config::FrankClawConfig,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
+    let mut warnings = Vec::new();
+
+    if config.models.providers.is_empty() {
+        warnings.push("no model providers configured".into());
+    }
+    if config.channels.is_empty() {
+        warnings.push("no channels configured".into());
+    }
+    if !config.security.encrypt_sessions {
+        warnings.push("session encryption is disabled".into());
+    }
+    if config.security.encrypt_sessions && load_master_key_from_env()?.is_none() {
+        warnings.push("session encryption is enabled but FRANKCLAW_MASTER_KEY is not set".into());
+    }
+    if !state_dir.exists() {
+        warnings.push(format!(
+            "state directory '{}' does not exist yet",
+            state_dir.display()
+        ));
+    }
+
+    for provider in &config.models.providers {
+        if let Some(env_name) = provider.api_key_ref.as_deref() {
+            if std::env::var(env_name).ok().filter(|value| !value.trim().is_empty()).is_none() {
+                warnings.push(format!(
+                    "provider '{}' references missing environment variable '{}'",
+                    provider.id, env_name
+                ));
+            }
+        }
+    }
+
+    for (channel_id, channel) in &config.channels {
+        for account in &channel.accounts {
+            for key in [
+                "bot_token_env",
+                "token_env",
+                "app_token_env",
+                "base_url_env",
+                "phone_number_id_env",
+                "verify_token_env",
+                "access_token_env",
+                "app_secret_env",
+            ] {
+                if let Some(env_name) = account.get(key).and_then(|value| value.as_str()) {
+                    if std::env::var(env_name).ok().filter(|value| !value.trim().is_empty()).is_none() {
+                        warnings.push(format!(
+                            "channel '{}' references missing environment variable '{}' via {}",
+                            channel_id, env_name, key
+                        ));
+                    }
+                }
+            }
+
+            if channel_id.as_str() == "whatsapp"
+                && account.get("app_secret").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).is_none()
+                && account.get("app_secret_env").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()).is_none()
+            {
+                warnings.push(
+                    "whatsapp channel has no app_secret configured; inbound webhook signatures will not be verified"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    let exposure = frankclaw_gateway::auth::assess_exposure(config)?;
+    warnings.extend(exposure.warnings);
+
+    Ok(warnings)
+}
+
 fn read_password() -> anyhow::Result<secrecy::SecretString> {
     let mut input = String::new();
     std::io::stdin()
         .read_line(&mut input)
         .context("failed to read password")?;
     Ok(secrecy::SecretString::from(input.trim().to_string()))
+}
+
+fn build_onboard_config(
+    channel: &str,
+    gateway_token: &str,
+) -> anyhow::Result<frankclaw_core::config::FrankClawConfig> {
+    use frankclaw_core::auth::AuthMode;
+    use frankclaw_core::config::{ChannelConfig, ProviderConfig};
+    use frankclaw_core::types::ChannelId;
+
+    let mut config = frankclaw_core::config::FrankClawConfig::default();
+    config.gateway.auth = AuthMode::Token {
+        token: Some(secrecy::SecretString::from(gateway_token.to_string())),
+    };
+    config.models.providers = vec![ProviderConfig {
+        id: "openai".into(),
+        api: "openai".into(),
+        base_url: None,
+        api_key_ref: Some("OPENAI_API_KEY".into()),
+        models: vec!["gpt-4o-mini".into()],
+        cooldown_secs: 30,
+    }];
+    config.models.default_model = Some("gpt-4o-mini".into());
+
+    let channel_config = match channel {
+        "web" => ChannelConfig {
+            enabled: true,
+            accounts: Vec::new(),
+            extra: serde_json::json!({
+                "dm_policy": "open"
+            }),
+        },
+        "telegram" => ChannelConfig {
+            enabled: true,
+            accounts: vec![serde_json::json!({
+                "bot_token_env": "TELEGRAM_BOT_TOKEN"
+            })],
+            extra: serde_json::json!({}),
+        },
+        "whatsapp" => ChannelConfig {
+            enabled: true,
+            accounts: vec![serde_json::json!({
+                "access_token_env": "WHATSAPP_ACCESS_TOKEN",
+                "phone_number_id_env": "WHATSAPP_PHONE_NUMBER_ID",
+                "verify_token_env": "WHATSAPP_VERIFY_TOKEN",
+                "app_secret_env": "WHATSAPP_APP_SECRET"
+            })],
+            extra: serde_json::json!({}),
+        },
+        "slack" => ChannelConfig {
+            enabled: true,
+            accounts: vec![serde_json::json!({
+                "app_token_env": "SLACK_APP_TOKEN",
+                "bot_token_env": "SLACK_BOT_TOKEN"
+            })],
+            extra: serde_json::json!({}),
+        },
+        "discord" => ChannelConfig {
+            enabled: true,
+            accounts: vec![serde_json::json!({
+                "bot_token_env": "DISCORD_BOT_TOKEN"
+            })],
+            extra: serde_json::json!({}),
+        },
+        "signal" => ChannelConfig {
+            enabled: true,
+            accounts: vec![serde_json::json!({
+                "base_url_env": "SIGNAL_BASE_URL",
+                "account_env": "SIGNAL_ACCOUNT"
+            })],
+            extra: serde_json::json!({}),
+        },
+        other => anyhow::bail!(
+            "unsupported onboard channel '{}'; expected web, telegram, whatsapp, slack, discord, or signal",
+            other
+        ),
+    };
+    config.channels.insert(ChannelId::new(channel), channel_config);
+    Ok(config)
+}
+
+fn render_systemd_unit(
+    executable: &std::path::Path,
+    config_path: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> String {
+    format!(
+        "[Unit]\nDescription=FrankClaw Gateway\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} gateway --config {} --state-dir {}\nWorkingDirectory={}\nRestart=on-failure\nRestartSec=5\nEnvironment=RUST_LOG=info\n# Environment=FRANKCLAW_MASTER_KEY=...\n\n[Install]\nWantedBy=default.target\n",
+        executable.display(),
+        config_path.display(),
+        state_dir.display(),
+        state_dir.display(),
+    )
 }
 
 fn display_skill_capability(
@@ -730,6 +937,55 @@ fn open_sessions(
         )
             .context("failed to open session store")?,
     ))
+}
+
+fn restrict_file_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onboard_whatsapp_profile_uses_env_refs_and_token_auth() {
+        let config = build_onboard_config("whatsapp", "gateway-token")
+            .expect("onboard config should build");
+
+        assert!(matches!(
+            config.gateway.auth,
+            frankclaw_core::auth::AuthMode::Token { .. }
+        ));
+        let channel = config
+            .channels
+            .get(&frankclaw_core::types::ChannelId::new("whatsapp"))
+            .expect("whatsapp channel should exist");
+        assert_eq!(
+            channel.accounts[0]["access_token_env"],
+            serde_json::json!("WHATSAPP_ACCESS_TOKEN")
+        );
+        assert_eq!(
+            channel.accounts[0]["app_secret_env"],
+            serde_json::json!("WHATSAPP_APP_SECRET")
+        );
+    }
+
+    #[test]
+    fn render_systemd_unit_contains_execstart() {
+        let unit = render_systemd_unit(
+            std::path::Path::new("/usr/local/bin/frankclaw"),
+            std::path::Path::new("/etc/frankclaw.json"),
+            std::path::Path::new("/var/lib/frankclaw"),
+        );
+
+        assert!(unit.contains("ExecStart=/usr/local/bin/frankclaw gateway --config /etc/frankclaw.json --state-dir /var/lib/frankclaw"));
+        assert!(unit.contains("WantedBy=default.target"));
+    }
 }
 
 fn open_pairing_store(
