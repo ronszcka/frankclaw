@@ -59,7 +59,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Shared outbound text normalization and reply-safe formatting
 - [ ] Channel-specific streaming or pseudo-streaming delivery
 - [x] Explicit group allowlist routing on supported group-capable channels
-- [ ] Better reply-tag semantics across supported channels
+- [x] Better reply-tag semantics across supported channels
 - [ ] Better WhatsApp-specific behavior beyond normalized inbound media/webhook handling and safer outbound text shaping
 - [ ] Broader platform-specific retry/backoff semantics
 

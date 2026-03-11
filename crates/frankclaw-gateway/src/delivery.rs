@@ -261,8 +261,14 @@ fn split_outbound_message(outbound: &OutboundMessage) -> Vec<OutboundMessage> {
 
     split_text(&outbound.text, max_chars)
         .into_iter()
-        .map(|text| OutboundMessage {
+        .enumerate()
+        .map(|(index, text)| OutboundMessage {
             text,
+            reply_to: if index == 0 {
+                outbound.reply_to.clone()
+            } else {
+                None
+            },
             ..outbound.clone()
         })
         .collect()
@@ -416,5 +422,28 @@ mod tests {
         assert_eq!(delivery.status, "sent");
         assert_eq!(delivery.chunks.len(), sent.len());
         assert!(sent.iter().all(|message| message.text.chars().count() <= 1900));
+    }
+
+    #[tokio::test]
+    async fn deliver_outbound_message_only_replies_on_first_chunk() {
+        let channel = Arc::new(CaptureChannel::new());
+        let outbound = OutboundMessage {
+            channel: ChannelId::new("discord"),
+            account_id: "default".into(),
+            to: "channel-1".into(),
+            thread_id: None,
+            text: "word ".repeat(600),
+            attachments: Vec::new(),
+            reply_to: Some("incoming-42".into()),
+        };
+
+        deliver_outbound_message(channel.clone(), outbound)
+            .await
+            .expect("delivery should succeed");
+        let sent = channel.drain().await;
+
+        assert!(sent.len() > 1);
+        assert_eq!(sent[0].reply_to.as_deref(), Some("incoming-42"));
+        assert!(sent.iter().skip(1).all(|message| message.reply_to.is_none()));
     }
 }
