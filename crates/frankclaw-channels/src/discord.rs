@@ -13,6 +13,7 @@ use frankclaw_core::channel::*;
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
+use crate::inbound_media::infer_inbound_mime_type;
 use crate::outbound_media::{attachment_bytes, attachment_filename};
 use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
 
@@ -485,10 +486,11 @@ fn parse_message_create(
                 .iter()
                 .map(|attachment| InboundAttachment {
                     media_id: None,
-                    mime_type: attachment["content_type"]
-                        .as_str()
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
+                    mime_type: infer_inbound_mime_type(
+                        attachment["content_type"].as_str(),
+                        attachment["filename"].as_str(),
+                        attachment["url"].as_str(),
+                    ),
                     filename: attachment["filename"].as_str().map(str::to_string),
                     size_bytes: attachment["size"].as_u64(),
                     url: attachment["url"].as_str().map(str::to_string),
@@ -857,6 +859,34 @@ mod tests {
         assert_eq!(inbound.attachments[0].filename.as_deref(), Some("image.png"));
         assert_eq!(inbound.attachments[0].mime_type, "image/png");
         assert_eq!(inbound.attachments[0].size_bytes, Some(1234));
+    }
+
+    #[test]
+    fn parse_message_create_infers_attachment_mime_type_from_filename() {
+        let inbound = parse_message_create(
+            &serde_json::json!({
+                "id": "msg-1",
+                "channel_id": "chan-1",
+                "content": "",
+                "timestamp": "2026-03-10T12:00:00Z",
+                "author": {
+                    "id": "user-1",
+                    "username": "alice",
+                    "bot": false
+                },
+                "attachments": [
+                    {
+                        "filename": "image.jpeg",
+                        "size": 1234,
+                        "url": "https://cdn.discordapp.com/file.jpeg"
+                    }
+                ]
+            }),
+            Some("999"),
+        )
+        .expect("message should parse");
+
+        assert_eq!(inbound.attachments[0].mime_type, "image/jpeg");
     }
 
     #[test]

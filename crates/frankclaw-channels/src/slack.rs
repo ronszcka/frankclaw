@@ -10,6 +10,7 @@ use frankclaw_core::channel::*;
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
+use crate::inbound_media::infer_inbound_mime_type;
 use crate::media_text::text_or_attachment_placeholder;
 use crate::outbound_media::{attachment_bytes, attachment_filename};
 use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
@@ -536,10 +537,11 @@ fn parse_event_message(event: &serde_json::Value, bot_user_id: Option<&str>) -> 
             files.iter()
                 .map(|file| InboundAttachment {
                     media_id: None,
-                    mime_type: file["mimetype"]
-                        .as_str()
-                        .unwrap_or("application/octet-stream")
-                        .to_string(),
+                    mime_type: infer_inbound_mime_type(
+                        file["mimetype"].as_str(),
+                        file["name"].as_str(),
+                        file["url_private"].as_str(),
+                    ),
                     filename: file["name"].as_str().map(str::to_string),
                     size_bytes: file["size"].as_u64(),
                     url: file["url_private"].as_str().map(str::to_string),
@@ -740,6 +742,28 @@ mod tests {
             inbound.attachments[0].url.as_deref(),
             Some("https://files.example/report.pdf")
         );
+    }
+
+    #[test]
+    fn parse_event_message_infers_file_mime_type_from_filename() {
+        let inbound = parse_event_message(
+            &serde_json::json!({
+                "type": "message",
+                "channel": "C123",
+                "channel_type": "channel",
+                "user": "U123",
+                "ts": "1710000000.123456",
+                "files": [{
+                    "name": "voice-note.m4a",
+                    "size": 2048,
+                    "url_private": "https://files.example/voice-note.m4a"
+                }]
+            }),
+            None,
+        )
+        .expect("message should parse");
+
+        assert_eq!(inbound.attachments[0].mime_type, "audio/mp4");
     }
 
     #[test]

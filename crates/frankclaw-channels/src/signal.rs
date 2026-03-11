@@ -8,6 +8,7 @@ use frankclaw_core::channel::*;
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::types::ChannelId;
 
+use crate::inbound_media::infer_inbound_mime_type;
 use crate::media_text::text_quote_or_attachment_placeholder;
 use crate::outbound_media::attachment_bytes;
 use crate::outbound_text::{normalize_outbound_text, OutboundTextFlavor};
@@ -460,10 +461,11 @@ fn build_inbound_attachments(
         .iter()
         .map(|attachment| InboundAttachment {
             media_id: None,
-            mime_type: attachment
-                .content_type
-                .clone()
-                .unwrap_or_else(|| "application/octet-stream".into()),
+            mime_type: infer_inbound_mime_type(
+                attachment.content_type.as_deref(),
+                attachment.filename.as_deref(),
+                None,
+            ),
             filename: attachment.filename.clone(),
             size_bytes: attachment.size,
             url: None,
@@ -692,6 +694,18 @@ mod tests {
         assert_eq!(inbound.thread_id.as_deref(), Some("group:group-42"));
         assert_eq!(inbound.text.as_deref(), Some("<media:image>"));
         assert_eq!(inbound.attachments.len(), 1);
+    }
+
+    #[test]
+    fn build_inbound_attachments_infers_mime_type_from_filename() {
+        let attachments = build_inbound_attachments(Some(&[SignalAttachmentPayload {
+            content_type: None,
+            filename: Some("voice-note.ogg".into()),
+            size: Some(321),
+        }]));
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].mime_type, "audio/ogg");
     }
 
     #[test]

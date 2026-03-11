@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod discord;
+mod inbound_media;
 mod media_text;
 mod outbound_media;
 mod outbound_text;
