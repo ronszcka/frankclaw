@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
-        ConnectInfo, Json, State, WebSocketUpgrade,
+        ConnectInfo, Json, Query, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -74,6 +74,7 @@ fn build_router(
     rate_limiter: Arc<AuthRateLimiter>,
 ) -> Router {
     Router::new()
+        .route("/", get(crate::ui::index))
         // WebSocket endpoint.
         .route("/ws", get(ws_handler))
         // Health probes (no auth required).
@@ -82,6 +83,8 @@ fn build_router(
         // Local web channel ingress / polling.
         .route("/api/web/inbound", post(web_inbound_handler))
         .route("/api/web/outbound", get(web_outbound_handler))
+        .route("/api/pairing/pending", get(pairing_pending_handler))
+        .route("/api/pairing/approve", post(pairing_approve_handler))
         // State.
         .with_state(AppState {
             gateway: state,
@@ -104,16 +107,24 @@ struct AppState {
     rate_limiter: Arc<AuthRateLimiter>,
 }
 
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct AuthQuery {
+    token: Option<String>,
+    password: Option<String>,
+    identity: Option<String>,
+}
+
 /// WebSocket upgrade handler with auth.
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let config = state.gateway.current_config();
     // Extract credential from the configured auth mode.
-    let credential = extract_credential(&headers, &config.gateway.auth);
+    let credential = extract_credential(&headers, Some(&query), &config.gateway.auth);
 
     // Authenticate.
     match authenticate(
@@ -149,10 +160,16 @@ async fn ws_handler(
 /// Extract auth credential from HTTP headers.
 fn extract_credential(
     headers: &HeaderMap,
+    query: Option<&AuthQuery>,
     mode: &frankclaw_core::auth::AuthMode,
 ) -> AuthCredential {
     match mode {
         frankclaw_core::auth::AuthMode::Token { .. } => {
+            if let Some(token) = query.and_then(|query| query.token.as_deref()) {
+                return AuthCredential::BearerToken(secrecy::SecretString::from(
+                    token.to_string(),
+                ));
+            }
             if let Some(auth) = headers.get("authorization") {
                 if let Ok(value) = auth.to_str() {
                     if let Some(token) = value.strip_prefix("Bearer ") {
@@ -164,6 +181,11 @@ fn extract_credential(
             }
         }
         frankclaw_core::auth::AuthMode::Password { .. } => {
+            if let Some(password) = query.and_then(|query| query.password.as_deref()) {
+                return AuthCredential::Password(secrecy::SecretString::from(
+                    password.to_string(),
+                ));
+            }
             if let Some(password) = headers.get("x-frankclaw-password") {
                 if let Ok(value) = password.to_str() {
                     return AuthCredential::Password(secrecy::SecretString::from(
@@ -182,6 +204,9 @@ fn extract_credential(
             }
         }
         frankclaw_core::auth::AuthMode::TrustedProxy { identity_header } => {
+            if let Some(identity) = query.and_then(|query| query.identity.as_deref()) {
+                return AuthCredential::ProxyIdentity(identity.to_string());
+            }
             if let Some(identity) = headers.get(identity_header.as_str()) {
                 if let Ok(value) = identity.to_str() {
                     return AuthCredential::ProxyIdentity(value.to_string());
@@ -241,11 +266,12 @@ fn default_web_account_id() -> String {
 
 async fn web_inbound_handler(
     State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<WebInboundRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = require_http_auth(&state, addr, &headers) {
+    if let Err(response) = require_http_auth(&state, addr, &headers, Some(&query)) {
         return response;
     }
 
@@ -279,10 +305,11 @@ async fn web_inbound_handler(
 
 async fn web_outbound_handler(
     State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(response) = require_http_auth(&state, addr, &headers) {
+    if let Err(response) = require_http_auth(&state, addr, &headers, Some(&query)) {
         return response;
     }
 
@@ -300,6 +327,60 @@ async fn web_outbound_handler(
         Json(serde_json::json!({ "messages": messages })),
     )
         .into_response()
+}
+
+async fn pairing_pending_handler(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(response) = require_http_auth(&state, addr, &headers, Some(&query)) {
+        return response;
+    }
+
+    let pending = state.gateway.pairing.list_pending(None);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "pending": pending })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PairingApproveRequest {
+    channel: String,
+    code: String,
+    account: Option<String>,
+}
+
+async fn pairing_approve_handler(
+    State(state): State<AppState>,
+    Query(query): Query<AuthQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<PairingApproveRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = require_http_auth(&state, addr, &headers, Some(&query)) {
+        return response;
+    }
+
+    match state
+        .gateway
+        .pairing
+        .approve(Some(&body.channel), body.account.as_deref(), &body.code)
+    {
+        Ok(approved) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "approved": approved })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 fn resolve_bind_addr(mode: &BindMode, port: u16) -> String {
@@ -324,9 +405,10 @@ fn require_http_auth(
     state: &AppState,
     addr: SocketAddr,
     headers: &HeaderMap,
+    query: Option<&AuthQuery>,
 ) -> std::result::Result<(), axum::response::Response> {
     let config = state.gateway.current_config();
-    let credential = extract_credential(headers, &config.gateway.auth);
+    let credential = extract_credential(headers, query, &config.gateway.auth);
     match authenticate(
         &config.gateway.auth,
         &credential,
@@ -931,6 +1013,7 @@ mod tests {
 
         match extract_credential(
             &headers,
+            None,
             &frankclaw_core::auth::AuthMode::Password {
                 hash: "hash".into(),
             },
@@ -949,6 +1032,7 @@ mod tests {
 
         match extract_credential(
             &headers,
+            None,
             &frankclaw_core::auth::AuthMode::TrustedProxy {
                 identity_header: "x-auth-user".into(),
             },
@@ -957,6 +1041,29 @@ mod tests {
                 assert_eq!(identity, "alice@example.com");
             }
             _ => panic!("expected proxy identity"),
+        }
+    }
+
+    #[test]
+    fn extracts_token_from_query_for_browser_ws_auth() {
+        let headers = HeaderMap::new();
+        let query = AuthQuery {
+            token: Some("browser-token".into()),
+            password: None,
+            identity: None,
+        };
+
+        match extract_credential(
+            &headers,
+            Some(&query),
+            &frankclaw_core::auth::AuthMode::Token {
+                token: Some(secrecy::SecretString::from("expected".to_string())),
+            },
+        ) {
+            AuthCredential::BearerToken(token) => {
+                assert_eq!(token.expose_secret(), "browser-token");
+            }
+            _ => panic!("expected token credential"),
         }
     }
 
