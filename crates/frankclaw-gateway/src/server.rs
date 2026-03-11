@@ -3,8 +3,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
+    body::Bytes,
     extract::{
-        ConnectInfo, Json, Query, State, WebSocketUpgrade,
+        ConnectInfo, Json, Path, Query, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -85,6 +86,7 @@ fn build_router(
         .route("/api/web/outbound", get(web_outbound_handler))
         .route("/api/pairing/pending", get(pairing_pending_handler))
         .route("/api/pairing/approve", post(pairing_approve_handler))
+        .route("/hooks/{mapping_id}", post(webhook_handler))
         // State.
         .with_state(AppState {
             gateway: state,
@@ -380,6 +382,128 @@ async fn pairing_approve_handler(
             Json(serde_json::json!({ "error": err.to_string() })),
         )
             .into_response(),
+    }
+}
+
+async fn webhook_handler(
+    State(state): State<AppState>,
+    Path(mapping_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let config = state.gateway.current_config();
+    let max_body_bytes = config
+        .hooks
+        .max_body_bytes
+        .unwrap_or(config.security.max_webhook_body_bytes)
+        .min(config.security.max_webhook_body_bytes);
+    if body.len() > max_body_bytes {
+        log_failure(
+            "webhook.receive",
+            serde_json::json!({
+                "mapping_id": mapping_id,
+                "reason": "body too large",
+                "size_bytes": body.len(),
+                "max_body_bytes": max_body_bytes,
+            }),
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "webhook body too large" })),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = crate::webhooks::verify_signature(
+        &config,
+        &body,
+        headers
+            .get("x-frankclaw-signature")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        log_failure(
+            "webhook.receive",
+            serde_json::json!({
+                "mapping_id": mapping_id,
+                "reason": err.to_string(),
+            }),
+        );
+        return (
+            StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response();
+    }
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(err) => {
+            log_failure(
+                "webhook.receive",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "reason": format!("invalid webhook JSON: {err}"),
+                }),
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid webhook JSON: {err}") })),
+            )
+                .into_response()
+        }
+    };
+    let resolved = match crate::webhooks::resolve_request(&config, &mapping_id, &payload) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            log_failure(
+                "webhook.receive",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "reason": err.to_string(),
+                }),
+            );
+            return (
+                StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::BAD_REQUEST),
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    match crate::webhooks::execute_request(&state.gateway, resolved).await {
+        Ok(response) => {
+            log_event(
+                "webhook.receive",
+                "success",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "session_key": response.session_key.as_str(),
+                    "model_id": response.model_id,
+                }),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_key": response.session_key.as_str(),
+                    "model_id": response.model_id,
+                    "content": response.content,
+                })),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            log_failure(
+                "webhook.receive",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "reason": err.to_string(),
+                }),
+            );
+            (
+                StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -845,7 +969,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use axum::body::{to_bytes, Body};
     use axum::http::{HeaderMap, HeaderValue};
+    use axum::http::Request;
     use frankclaw_channels::ChannelSet;
     use frankclaw_core::channel::SendResult;
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
@@ -857,6 +983,7 @@ mod tests {
     use frankclaw_core::types::Role;
     use frankclaw_sessions::SqliteSessionStore;
     use secrecy::ExposeSecret;
+    use tower::ServiceExt;
 
     struct MockProvider;
     struct CaptureChannel {
@@ -1400,6 +1527,61 @@ mod tests {
             session.metadata["delivery"]["last_reply"]["reply_to"],
             serde_json::json!("1710000000123")
         );
+
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn webhook_http_route_verifies_signature_and_executes_runtime() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-webhook-http-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = FrankClawConfig::default();
+        config.hooks.enabled = true;
+        config.hooks.token = Some("secret".into());
+        config.hooks.mappings = vec![serde_json::json!({
+            "id": "incoming",
+            "session_key": "default:web:hook-control",
+        })];
+        let channels = Arc::new(ChannelSet::from_parts(HashMap::new(), None));
+        let (state, sessions) = build_test_state(&temp_dir, config.clone(), channels).await;
+        let app = build_router(
+            state.clone(),
+            Arc::new(AuthRateLimiter::new(config.gateway.rate_limit.clone())),
+        );
+        let body = br#"{"message":"hello from http hook"}"#.to_vec();
+        let response = app
+            .oneshot(
+                Request::post("/hooks/incoming")
+                    .header(
+                        "x-frankclaw-signature",
+                        crate::webhooks::encode_signature("secret", &body),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("response should be JSON");
+        assert_eq!(payload["content"], serde_json::json!("mock reply"));
+
+        let transcript = sessions
+            .get_transcript(&frankclaw_core::types::SessionKey::from_raw("default:web:hook-control"), 10, None)
+            .await
+            .expect("transcript should load");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].content, "hello from http hook");
+        assert_eq!(transcript[1].content, "mock reply");
 
         let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
         let _ = std::fs::remove_file(temp_dir.join("pairings.json"));

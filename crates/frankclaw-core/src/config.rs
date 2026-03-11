@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::auth::{AuthMode, RateLimitConfig};
 use crate::error::{FrankClawError, Result};
 use crate::session::{PruningConfig, SessionResetPolicy, SessionScoping};
-use crate::types::{AgentId, ChannelId};
+use crate::types::{AgentId, ChannelId, SessionKey};
 
 /// Top-level FrankClaw configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +116,8 @@ impl FrankClawConfig {
             channel.security_policy()?;
             validate_channel_config(channel_id, channel)?;
         }
+
+        self.hooks.parsed_mappings()?;
 
         Ok(())
     }
@@ -528,6 +530,88 @@ pub struct HooksConfig {
     pub mappings: Vec<serde_json::Value>,
 }
 
+impl HooksConfig {
+    pub fn parsed_mappings(&self) -> Result<Vec<WebhookMapping>> {
+        if !self.enabled {
+            return Ok(Vec::new());
+        }
+        if self
+            .token
+            .as_deref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(FrankClawError::ConfigValidation {
+                msg: "hooks.enabled requires a non-empty hooks.token".into(),
+            });
+        }
+        if self.mappings.is_empty() {
+            return Err(FrankClawError::ConfigValidation {
+                msg: "hooks.enabled requires at least one mapping".into(),
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut mappings = Vec::with_capacity(self.mappings.len());
+        for raw in &self.mappings {
+            let mapping: WebhookMapping = serde_json::from_value(raw.clone()).map_err(|err| {
+                FrankClawError::ConfigValidation {
+                    msg: format!("invalid webhook mapping: {err}"),
+                }
+            })?;
+            if mapping.id.trim().is_empty() {
+                return Err(FrankClawError::ConfigValidation {
+                    msg: "webhook mapping id cannot be empty".into(),
+                });
+            }
+            if !seen.insert(mapping.id.clone()) {
+                return Err(FrankClawError::ConfigValidation {
+                    msg: format!("duplicate webhook mapping '{}'", mapping.id),
+                });
+            }
+            if mapping.text_field.trim().is_empty() {
+                return Err(FrankClawError::ConfigValidation {
+                    msg: format!("webhook mapping '{}' text_field cannot be empty", mapping.id),
+                });
+            }
+            if let (Some(agent_id), Some(session_key)) = (&mapping.agent_id, &mapping.session_key) {
+                if let Some((session_agent, _, _)) = session_key.parse() {
+                    if &session_agent != agent_id {
+                        return Err(FrankClawError::ConfigValidation {
+                            msg: format!(
+                                "webhook mapping '{}' session '{}' does not belong to agent '{}'",
+                                mapping.id, session_key, agent_id
+                            ),
+                        });
+                    }
+                }
+            }
+            mappings.push(mapping);
+        }
+        Ok(mappings)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebhookMapping {
+    pub id: String,
+    pub agent_id: Option<AgentId>,
+    pub session_key: Option<SessionKey>,
+    pub text_field: String,
+}
+
+impl Default for WebhookMapping {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            agent_id: None,
+            session_key: None,
+            text_field: "message".into(),
+        }
+    }
+}
+
 /// Logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -758,6 +842,36 @@ mod tests {
                 extra: serde_json::json!({}),
             },
         );
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn hooks_require_token_and_mapping_when_enabled() {
+        let mut config = FrankClawConfig::default();
+        config.hooks.enabled = true;
+
+        assert!(config.validate().is_err());
+
+        config.hooks.token = Some("secret".into());
+        config.hooks.mappings = vec![serde_json::json!({
+            "id": "incoming",
+            "text_field": "message"
+        })];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn webhook_mapping_rejects_mismatched_agent_and_session() {
+        let mut config = FrankClawConfig::default();
+        config.hooks.enabled = true;
+        config.hooks.token = Some("secret".into());
+        config.hooks.mappings = vec![serde_json::json!({
+            "id": "incoming",
+            "agent_id": "main",
+            "session_key": "other:web:default",
+            "text_field": "message"
+        })];
 
         assert!(config.validate().is_err());
     }

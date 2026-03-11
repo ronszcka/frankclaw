@@ -10,4 +10,5 @@ pub mod rate_limit;
 pub mod server;
 pub mod state;
 pub mod ui;
+pub mod webhooks;
 pub mod ws;

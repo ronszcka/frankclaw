@@ -213,6 +213,69 @@ pub async fn chat_send(
     }
 }
 
+/// Handle `webhooks.test` method.
+pub async fn webhooks_test(
+    state: &Arc<GatewayState>,
+    request: RequestFrame,
+) -> ResponseFrame {
+    let mapping_id = match request.params.get("mapping_id").and_then(|value| value.as_str()) {
+        Some(mapping_id) if !mapping_id.trim().is_empty() => mapping_id,
+        _ => return ResponseFrame::err(request.id, 400, "mapping_id is required"),
+    };
+    let payload = match request.params.get("payload") {
+        Some(payload) => payload,
+        None => return ResponseFrame::err(request.id, 400, "payload is required"),
+    };
+
+    let config = state.current_config();
+    let resolved = match crate::webhooks::resolve_request(&config, mapping_id, payload) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            crate::audit::log_failure(
+                "webhook.test",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "reason": err.to_string(),
+                }),
+            );
+            return ResponseFrame::err(request.id, err.status_code(), err.to_string());
+        }
+    };
+
+    match crate::webhooks::execute_request(state, resolved).await {
+        Ok(response) => {
+            crate::audit::log_event(
+                "webhook.test",
+                "success",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "session_key": response.session_key.as_str(),
+                    "model_id": response.model_id,
+                }),
+            );
+            ResponseFrame::ok(
+                request.id,
+                serde_json::json!({
+                    "session_key": response.session_key.as_str(),
+                    "model_id": response.model_id,
+                    "content": response.content,
+                    "usage": response.usage,
+                }),
+            )
+        }
+        Err(err) => {
+            crate::audit::log_failure(
+                "webhook.test",
+                serde_json::json!({
+                    "mapping_id": mapping_id,
+                    "reason": err.to_string(),
+                }),
+            );
+            ResponseFrame::err(request.id, err.status_code(), err.to_string())
+        }
+    }
+}
+
 fn parse_session_key_param(
     request: &RequestFrame,
 ) -> std::result::Result<SessionKey, ResponseFrame> {
@@ -441,6 +504,59 @@ mod tests {
             .await
             .expect("transcript should load");
         assert!(transcript.is_empty());
+
+        let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
+        let _ = std::fs::remove_file(temp_dir.join("pairings.json"));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn webhooks_test_executes_runtime_chat() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-methods-webhook-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let (state, sessions) = build_test_state(&temp_dir).await;
+        let mut config = state.current_config().as_ref().clone();
+        config.hooks.enabled = true;
+        config.hooks.token = Some("secret".into());
+        config.hooks.mappings = vec![serde_json::json!({
+            "id": "incoming",
+            "session_key": "default:web:hook-control",
+        })];
+        state.reload_config(config);
+
+        let response = webhooks_test(
+            &state,
+            RequestFrame {
+                id: RequestId::Text("1".into()),
+                method: Method::WebhooksTest,
+                params: serde_json::json!({
+                    "mapping_id": "incoming",
+                    "payload": {
+                        "message": "hello from hook"
+                    }
+                }),
+            },
+        )
+        .await;
+
+        assert!(response.error.is_none());
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|value| value["content"].as_str()),
+            Some("mock reply")
+        );
+
+        let transcript = sessions
+            .get_transcript(&SessionKey::from_raw("default:web:hook-control"), 10, None)
+            .await
+            .expect("transcript should load");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].content, "hello from hook");
+        assert_eq!(transcript[1].content, "mock reply");
 
         let _ = std::fs::remove_file(temp_dir.join("sessions.db"));
         let _ = std::fs::remove_file(temp_dir.join("pairings.json"));

@@ -198,6 +198,9 @@ async fn dispatch_method(
             let models = serde_json::to_value(state.runtime.list_models()).unwrap_or_default();
             ResponseFrame::ok(request.id, serde_json::json!({ "models": models }))
         }
+        Method::WebhooksTest => {
+            crate::methods::webhooks_test(state, request).await
+        }
         _ => ResponseFrame::err(
             request.id,
             501,
@@ -231,6 +234,11 @@ fn redact_config(config: &frankclaw_core::config::FrankClawConfig) -> serde_json
                         }
                     }
                 }
+            }
+        }
+        if let Some(hooks) = obj.get_mut("hooks") {
+            if let Some(token) = hooks.get_mut("token") {
+                *token = serde_json::json!("[REDACTED]");
             }
         }
     }
