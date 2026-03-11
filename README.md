@@ -2,14 +2,25 @@
 
 A security-hardened personal AI assistant gateway written in Rust. Connects messaging channels to AI model providers through a local WebSocket control plane.
 
-FrankClaw is a ground-up Rust rewrite of [OpenClaw](https://github.com/openclaw/openclaw), preserving the architectural vision while replacing the TypeScript implementation with memory-safe, zero-cost abstractions and defense-in-depth security.
+FrankClaw is a ground-up Rust rewrite of [OpenClaw](https://github.com/openclaw/openclaw), preserving the architectural vision while replacing the TypeScript implementation with memory-safe abstractions and stricter security defaults.
+
+Current scope and parity status:
+- supported channels: `web`, `telegram`, `discord`, `slack`, `signal`, `whatsapp`
+- local Canvas host
+- bounded tool orchestration
+- operator onboarding and install helpers
+
+For the remaining distance to OpenClaw feature parity, see [PARITY_TODO.md](PARITY_TODO.md) and [FEATURE_PLANS.md](FEATURE_PLANS.md).
 
 ## Features
 
-- **Multi-channel messaging** — Telegram, Web chat (Discord, Slack, Signal, and more coming)
+- **Multi-channel messaging** — Web, Telegram, Discord, Slack, Signal, WhatsApp
 - **Multi-provider AI** — OpenAI, Anthropic, Ollama with automatic failover
 - **Encrypted sessions** — SQLite-backed with ChaCha20-Poly1305 encryption at rest
 - **Scheduled jobs** — Cron-based task scheduling with agent delivery
+- **Canvas host** — local authenticated visual workspace surface
+- **Bounded tools** — session inspection today, richer tool depth planned
+- **Operator support** — doctor, status, remote exposure checks, onboarding, and systemd unit generation
 - **Media pipeline** — File handling with SSRF protection and filename sanitization
 - **Plugin system** — Trait-based channel and provider adapters
 - **Zero unsafe code** — `#![forbid(unsafe_code)]` on every crate
@@ -52,7 +63,7 @@ FrankClaw is a ground-up Rust rewrite of [OpenClaw](https://github.com/openclaw/
 | `frankclaw-gateway` | Axum WebSocket + HTTP server, auth, rate limiting, config hot-reload |
 | `frankclaw-sessions` | SQLite session store with optional encrypted transcripts |
 | `frankclaw-models` | AI provider adapters (OpenAI, Anthropic, Ollama) with failover chain |
-| `frankclaw-channels` | Messaging channel adapters (Telegram, Web) |
+| `frankclaw-channels` | Messaging channel adapters (Web, Telegram, Discord, Slack, Signal, WhatsApp) |
 | `frankclaw-memory` | Vector search traits for long-term memory |
 | `frankclaw-cron` | Scheduled job service |
 | `frankclaw-media` | File storage with SSRF-safe HTTP fetcher |
@@ -80,10 +91,11 @@ The binary is at `target/release/frankclaw`.
 ### 2. Initialize Configuration
 
 ```bash
-./target/release/frankclaw init
+./target/release/frankclaw onboard --channel web
 ```
 
 This creates `~/.local/share/frankclaw/frankclaw.json` with secure defaults and `0600` file permissions.
+Use `--channel telegram`, `--channel whatsapp`, `--channel slack`, `--channel discord`, or `--channel signal` to start from a channel-specific profile.
 
 ### 3. Generate an Auth Token
 
@@ -161,6 +173,8 @@ The gateway starts on `127.0.0.1:18789` by default. Connect via WebSocket for th
 
 ```bash
 ./target/release/frankclaw check
+./target/release/frankclaw doctor
+./target/release/frankclaw status
 ```
 
 ### 7. Run Tests
@@ -175,8 +189,13 @@ cargo test
 frankclaw gateway         Start the gateway server
 frankclaw gen-token       Generate a 256-bit auth token
 frankclaw hash-password   Hash a password with Argon2id for config
-frankclaw init            Create config file with secure defaults
+frankclaw onboard         Create a starter config for a supported channel profile
+frankclaw init            Create a blank config with secure defaults
 frankclaw check           Validate config file
+frankclaw doctor          Run high-signal validation and readiness checks
+frankclaw status          Show runtime and exposure status
+frankclaw remote-status   Show remote exposure posture
+frankclaw install-systemd Print a systemd unit for the current install
 frankclaw config          Show resolved configuration (secrets redacted)
 ```
 
