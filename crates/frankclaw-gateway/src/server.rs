@@ -126,6 +126,14 @@ struct AuthQuery {
     identity: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct WebOutboundQuery {
+    #[serde(flatten)]
+    auth: AuthQuery,
+    recipient_id: Option<String>,
+    account_id: Option<String>,
+}
+
 /// WebSocket upgrade handler with auth.
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -361,11 +369,11 @@ async fn web_inbound_handler(
 
 async fn web_outbound_handler(
     State(state): State<AppState>,
-    Query(query): Query<AuthQuery>,
+    Query(query): Query<WebOutboundQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(response) = require_http_auth(&state, addr, &headers, Some(&query)) {
+    if let Err(response) = require_http_auth(&state, addr, &headers, Some(&query.auth)) {
         return response;
     }
 
@@ -377,7 +385,17 @@ async fn web_outbound_handler(
             .into_response();
     };
 
-    let messages = web.drain_outbound().await;
+    let account_id = query
+        .account_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("default");
+    let recipient_id = query
+        .recipient_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("console-browser");
+    let messages = web.drain_outbound(account_id, recipient_id).await;
     (
         StatusCode::OK,
         Json(serde_json::json!({ "messages": messages })),
@@ -1362,7 +1380,7 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use axum::http::Request;
     use frankclaw_channels::{ChannelSet, whatsapp::WhatsAppChannel};
-    use frankclaw_core::channel::SendResult;
+    use frankclaw_core::channel::{ChannelPlugin, SendResult};
     use frankclaw_core::config::{ChannelConfig, ProviderConfig};
     use frankclaw_core::model::{
         CompletionRequest, CompletionResponse, FinishReason, InputModality, ModelApi,
@@ -1667,7 +1685,7 @@ mod tests {
         let outbound = state
             .web_channel()
             .expect("web channel should exist")
-            .drain_outbound()
+            .drain_outbound("default", "user-1")
             .await;
         assert_eq!(outbound.len(), 1);
         assert_eq!(outbound[0].text, "mock reply");
@@ -1915,7 +1933,8 @@ mod tests {
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript[0].content, "here is a screenshot");
 
-        let mut outbound_request = Request::get("/api/web/outbound?token=super-secret")
+        let mut outbound_request =
+            Request::get("/api/web/outbound?token=super-secret&recipient_id=console-browser")
             .body(Body::empty())
             .expect("request should build");
         outbound_request
@@ -1932,6 +1951,98 @@ mod tests {
         let outbound_json: serde_json::Value =
             serde_json::from_slice(&outbound_body).expect("outbound response should be json");
         assert_eq!(outbound_json["messages"][0]["text"], serde_json::json!("mock reply"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn web_outbound_route_only_drains_messages_for_requested_recipient() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "frankclaw-gateway-web-outbound-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = FrankClawConfig::default();
+        config.gateway.auth = frankclaw_core::auth::AuthMode::Token {
+            token: Some(SecretString::from("super-secret".to_string())),
+        };
+        config.channels.insert(
+            frankclaw_core::types::ChannelId::new("web"),
+            ChannelConfig {
+                enabled: true,
+                accounts: Vec::new(),
+                extra: serde_json::json!({
+                    "dm_policy": "open"
+                }),
+            },
+        );
+        let channels = Arc::new(
+            frankclaw_channels::load_from_config(&config).expect("channels should load"),
+        );
+        let (state, _sessions) = build_test_state(&temp_dir, config, channels).await;
+        let web = state.web_channel().expect("web channel should exist");
+        web.send(OutboundMessage {
+            channel: frankclaw_core::types::ChannelId::new("web"),
+            account_id: "default".into(),
+            to: "browser-a".into(),
+            thread_id: None,
+            text: "reply for a".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        })
+        .await
+        .expect("send should succeed");
+        web.send(OutboundMessage {
+            channel: frankclaw_core::types::ChannelId::new("web"),
+            account_id: "default".into(),
+            to: "browser-b".into(),
+            thread_id: None,
+            text: "reply for b".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        })
+        .await
+        .expect("send should succeed");
+
+        let app = build_router(state.clone(), Arc::new(AuthRateLimiter::new(
+            state.current_config().gateway.rate_limit.clone(),
+        )));
+
+        let mut request =
+            Request::get("/api/web/outbound?token=super-secret&recipient_id=browser-a")
+                .body(Body::empty())
+                .expect("request should build");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let response = app.clone().oneshot(request).await.expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be json");
+        assert_eq!(json["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["messages"][0]["text"], serde_json::json!("reply for a"));
+
+        let mut other_request =
+            Request::get("/api/web/outbound?token=super-secret&recipient_id=browser-b")
+                .body(Body::empty())
+                .expect("request should build");
+        other_request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let other_response = app
+            .clone()
+            .oneshot(other_request)
+            .await
+            .expect("request should succeed");
+        let other_body = to_bytes(other_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let other_json: serde_json::Value =
+            serde_json::from_slice(&other_body).expect("response should be json");
+        assert_eq!(other_json["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(other_json["messages"][0]["text"], serde_json::json!("reply for b"));
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

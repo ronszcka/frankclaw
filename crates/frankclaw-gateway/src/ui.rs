@@ -406,6 +406,7 @@ pub async fn index() -> Html<&'static str> {
       selectedSession: "",
       currentCanvas: null,
       pendingAttachments: [],
+      webClientId: loadWebClientId(),
     };
 
     const els = {
@@ -458,6 +459,20 @@ pub async fn index() -> Html<&'static str> {
       div.innerHTML = `<small>${label}</small><div></div>`;
       div.querySelector("div").textContent = content;
       els.feed.prepend(div);
+    }
+
+    function loadWebClientId() {
+      try {
+        const existing = sessionStorage.getItem("frankclaw-web-client-id");
+        if (existing) return existing;
+        const generated = (globalThis.crypto && globalThis.crypto.randomUUID)
+          ? globalThis.crypto.randomUUID()
+          : `web-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        sessionStorage.setItem("frankclaw-web-client-id", generated);
+        return generated;
+      } catch (_) {
+        return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
     }
 
     function buildWsUrl() {
@@ -554,7 +569,7 @@ pub async fn index() -> Html<&'static str> {
 
     async function drainWebOutbound(maxAttempts = 12) {
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        const response = await apiFetch("/api/web/outbound");
+        const response = await apiFetch(`/api/web/outbound?recipient_id=${encodeURIComponent(state.webClientId)}`);
         const messages = response.messages || [];
         if (messages.length) {
           return messages;
@@ -859,7 +874,7 @@ pub async fn index() -> Html<&'static str> {
 
       if (attachments.length) {
         const body = {
-          sender_id: "console-browser",
+          sender_id: state.webClientId,
           sender_name: "FrankClaw Console",
           message: message || null,
           attachments,

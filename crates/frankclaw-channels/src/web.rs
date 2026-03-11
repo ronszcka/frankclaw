@@ -11,21 +11,27 @@ use frankclaw_core::types::ChannelId;
 /// Messages arrive via the gateway's HTTP API and are forwarded here.
 /// This is the simplest channel — no external service dependency.
 pub struct WebChannel {
-    /// Pending outbound messages for HTTP long-poll clients.
-    outbound: tokio::sync::Mutex<Vec<OutboundMessage>>,
+    /// Pending outbound messages keyed per web recipient.
+    outbound: tokio::sync::Mutex<std::collections::HashMap<String, Vec<OutboundMessage>>>,
 }
 
 impl WebChannel {
     pub fn new() -> Self {
         Self {
-            outbound: tokio::sync::Mutex::new(Vec::new()),
+            outbound: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    /// Retrieve pending outbound messages (called by HTTP handler).
-    pub async fn drain_outbound(&self) -> Vec<OutboundMessage> {
+    /// Retrieve pending outbound messages for one web recipient.
+    pub async fn drain_outbound(
+        &self,
+        account_id: &str,
+        recipient_id: &str,
+    ) -> Vec<OutboundMessage> {
         let mut pending = self.outbound.lock().await;
-        std::mem::take(&mut *pending)
+        pending
+            .remove(&outbound_queue_key(account_id, recipient_id))
+            .unwrap_or_default()
     }
 }
 
@@ -70,9 +76,70 @@ impl ChannelPlugin for WebChannel {
 
     async fn send(&self, msg: OutboundMessage) -> Result<SendResult> {
         let msg_id = uuid::Uuid::new_v4().to_string();
-        self.outbound.lock().await.push(msg);
+        let queue_key = outbound_queue_key(&msg.account_id, &msg.to);
+        self.outbound
+            .lock()
+            .await
+            .entry(queue_key)
+            .or_default()
+            .push(msg);
         Ok(SendResult::Sent {
             platform_message_id: msg_id,
         })
+    }
+}
+
+fn outbound_queue_key(account_id: &str, recipient_id: &str) -> String {
+    format!("{}:{}", account_id.trim(), recipient_id.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frankclaw_core::types::MediaId;
+
+    #[tokio::test]
+    async fn drain_outbound_only_returns_messages_for_requested_recipient() {
+        let channel = WebChannel::new();
+        channel
+            .send(OutboundMessage {
+                channel: ChannelId::new("web"),
+                account_id: "default".into(),
+                to: "browser-a".into(),
+                thread_id: None,
+                text: "hello a".into(),
+                attachments: Vec::new(),
+                reply_to: None,
+            })
+            .await
+            .expect("send should succeed");
+        channel
+            .send(OutboundMessage {
+                channel: ChannelId::new("web"),
+                account_id: "default".into(),
+                to: "browser-b".into(),
+                thread_id: None,
+                text: "hello b".into(),
+                attachments: vec![OutboundAttachment {
+                    media_id: MediaId::new(),
+                    mime_type: "image/png".into(),
+                    filename: Some("photo.png".into()),
+                    url: Some("/api/media/test".into()),
+                    bytes: b"png".to_vec(),
+                }],
+                reply_to: None,
+            })
+            .await
+            .expect("send should succeed");
+
+        let a = channel.drain_outbound("default", "browser-a").await;
+        let b = channel.drain_outbound("default", "browser-b").await;
+
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].text, "hello a");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].text, "hello b");
+        assert_eq!(b[0].attachments.len(), 1);
+        assert!(channel.drain_outbound("default", "browser-a").await.is_empty());
     }
 }
