@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod context;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -211,7 +213,28 @@ impl Runtime {
 
         self.ensure_session(&session_key, &agent_id).await?;
 
-        let mut request_messages: Vec<CompletionMessage> = history
+        // Resolve the model definition for context window awareness.
+        let model_def = self
+            .model_defs
+            .iter()
+            .find(|m| m.id == model_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                // Fallback: use conservative defaults if model not in catalog.
+                ModelDef {
+                    id: model_id.clone(),
+                    name: model_id.clone(),
+                    api: frankclaw_core::model::ModelApi::OpenaiCompletions,
+                    reasoning: false,
+                    input: vec![frankclaw_core::model::InputModality::Text],
+                    cost: Default::default(),
+                    context_window: 128_000,
+                    max_output_tokens: 4096,
+                    compat: Default::default(),
+                }
+            });
+
+        let raw_messages: Vec<CompletionMessage> = history
             .iter()
             .map(|entry| CompletionMessage {
                 role: entry.role,
@@ -222,6 +245,23 @@ impl Runtime {
                 content: request.message.clone(),
             }))
             .collect();
+
+        // Optimize context to fit within the model's token budget.
+        let system_prompt = self.build_system_prompt(&agent_id, &agent);
+        let context_result = context::optimize_context(
+            raw_messages,
+            &model_def,
+            system_prompt.as_deref(),
+        );
+        if context_result.compacted {
+            tracing::info!(
+                session = %session_key,
+                pruned = context_result.pruned_count,
+                estimated_tokens = context_result.estimated_tokens,
+                "context window optimized — pruned old messages"
+            );
+        }
+        let mut request_messages = context_result.messages;
 
         let user_metadata = (!request.attachments.is_empty()).then(|| {
             serde_json::json!({
@@ -238,7 +278,6 @@ impl Runtime {
         .await?;
         next_seq += 1;
 
-        let system_prompt = self.build_system_prompt(&agent_id, &agent);
         let mut remaining_tool_calls = MAX_TOOL_CALLS_PER_TURN;
         let mut tool_tracker = ToolCallTracker::new();
         let turn_deadline = tokio::time::Instant::now()

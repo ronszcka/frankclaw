@@ -3,10 +3,13 @@
 This file tracks the remaining distance between FrankClaw and the broader OpenClaw feature surface.
 It should stay current as features land, are deferred, or are explicitly dropped.
 
+**Last verified**: 2026-03-11 — systematic directory-by-directory audit of OpenClaw `src/` (~192k LOC
+across ~2,864 non-test TypeScript files) against FrankClaw (~27k LOC across 13 Rust crates).
+
 ## Current Position
 
 FrankClaw has been audited against OpenClaw's battle-tested implementation.
-See `AUDIT_PLAN.md` for the full audit results across all 7 components.
+See `AUDIT_PLAN.md` for the full audit results across all 14 components.
 It now has a working hardened core with:
 
 - inbound/outbound assistant loop
@@ -20,8 +23,9 @@ It now has a working hardened core with:
 - local Canvas host
 - operator onboarding and install helpers
 
-FrankClaw is still not close to full OpenClaw breadth.
-The main remaining gap is feature surface, not the core message-to-model flow.
+FrankClaw covers the **core message-to-model flow** well but is missing many
+of OpenClaw's advanced subsystems. The gap is primarily in runtime intelligence,
+extensibility, and multimodal capabilities — not the transport/plumbing layer.
 
 ## Implemented Core and Surfaces
 
@@ -31,14 +35,15 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Local browser console UI
 - [x] Pairing and inbound policy hardening
 - [x] Cron execution through shared runtime
-- [x] Signed webhook ingestion
+- [x] Signed webhook ingestion with replay protection
 - [x] Read-only and bounded model-driven tools
-- [x] Local Canvas host surface
+- [x] Local Canvas host surface with revision conflict detection
 - [x] Operator health, remote exposure, onboarding, and systemd helpers
 - [x] Normalized inbound media placeholders on supported channels
 - [x] Chromium-backed browser session tools (`open`, `extract`, `snapshot`)
 - [x] Selector-based browser actions (`click`, `type`, `wait`, `press`)
 - [x] Browser session visibility and close control (`sessions`, `close`)
+- [x] Provider SSE streaming for OpenAI/Anthropic/Ollama
 
 ## Implemented Channels
 
@@ -51,78 +56,185 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 
 ## Missing or Partial vs OpenClaw
 
-### Rich Channel Behavior
+### Agent Intelligence Layer
+
+These are the core "brain" features that make OpenClaw's agent loop sophisticated:
+
+- [ ] **Context Engine** — Pluggable context management system
+  OpenClaw has a full registry pattern for context engines with assemble (build model context),
+  compact (reduce context window), ingest (add messages), and bootstrap operations. FrankClaw
+  has none of this — it passes raw session history to the model with no context management.
+
+- [ ] **Context Compaction** — Automatic context window management
+  OpenClaw auto-compacts conversation history when approaching token limits with identifier
+  preservation, token sanitization, retry logic, and tool result summarization. FrankClaw
+  has no compaction and will hit context window limits on long conversations.
+
+- [ ] **Subagent System** — Hierarchical agent spawning
+  OpenClaw supports spawning subagents with depth limits, lifecycle management (spawn, steer,
+  announce, complete), a persistent registry, attachment forwarding, and context inheritance.
+  FrankClaw has no subagent concept.
+
+- [ ] **Auto-Reply Command System** — Structured command dispatch
+  OpenClaw has a full command detection, registry, and dispatch pipeline with heartbeat,
+  inbound debounce, group activation, thinking mode management, model directives, and block
+  streaming. FrankClaw has a simpler direct-to-model flow.
+
+- [ ] **System Prompt Construction** — Dynamic system prompt assembly
+  OpenClaw builds system prompts dynamically from agent identity, workspace context, bootstrap
+  files, project settings, tool descriptions, and context engine additions. FrankClaw uses
+  static system prompts from config.
+
+### Multimodal & Content Understanding
+
+- [ ] **Media Understanding** — Vision, audio transcription, video analysis
+  OpenClaw has a full multimodal pipeline: vision analysis (image understanding via model),
+  audio transcription (Deepgram, OpenAI Whisper), video analysis, provider registry, auto-detection
+  of capabilities, attachment normalization/caching. FrankClaw passes media placeholders but
+  has no content understanding.
+
+- [ ] **Link Understanding** — URL content extraction
+  OpenClaw extracts URLs from messages, fetches their content (with SSRF protection), and
+  formats it as context for the model. FrankClaw does not process URLs in messages.
+
+- [ ] **TTS (Text-to-Speech)** — Voice output
+  OpenClaw supports multiple TTS providers: OpenAI TTS, ElevenLabs, Edge TTS (Microsoft),
+  Sherpa ONNX (local). Per-channel auto mode, text summarization before synthesis, markdown
+  stripping. FrankClaw has no TTS.
+
+### Extensibility & Hooks
+
+- [ ] **Hooks System** — Event-driven extensibility
+  OpenClaw has a full hook system with event types (command, session, agent, gateway, message),
+  fire-and-forget hooks, bundled hooks, message hook mappers, frontmatter parsing, workspace
+  hooks, hook installer/loader. FrankClaw has webhooks but no general hook/plugin event system.
+
+- [ ] **Gmail Integration** — Email as inbound channel
+  OpenClaw integrates Gmail via Google Pub/Sub with Tailscale tunneling, label filtering,
+  push token auth, configurable polling. FrankClaw has no email integration.
+
+- [ ] **Skills System** — Installable agent skills
+  OpenClaw has installable/downloadable skills, workspace scanning, bundled allowlist,
+  skill status tracking, tar extraction. FrankClaw has no skills concept.
+
+- [ ] **ACP (Agent Client Protocol)** — Standard agent protocol
+  OpenClaw implements ACP for agent sessions with persistent bindings, session mapping,
+  policy enforcement, event mapping, secret file support, rate limiting. FrankClaw has
+  its own WebSocket protocol but no ACP.
+
+### Runtime & Execution
+
+- [ ] **Sandboxed Agent Runtime** — Docker-based execution
+  OpenClaw has full Docker container sandboxing with path policies, media path mapping,
+  tool policy enforcement, per-agent sandbox config, workspace-only mode. FrankClaw has
+  no sandboxing.
+
+- [ ] **Bash Tools** — Shell command execution
+  OpenClaw has bash tool execution with PTY support, process registry, approval requests,
+  background jobs, abort handling, script preflight, send-keys. FrankClaw has browser
+  tools but no shell execution tools.
+
+- [ ] **Model Catalog & Discovery** — Provider auto-discovery
+  OpenClaw has extensive model management: auto-discovery across providers (Ollama, Bedrock,
+  HuggingFace, Venice, etc.), compatibility layers, forward compatibility, tool support
+  detection, provider capabilities, synthetic models. FrankClaw has a static provider list
+  with manual failover chain.
+
+- [ ] **Auth Profile Rotation** — Multi-profile provider auth
+  OpenClaw supports multiple auth profiles per provider with cooldown auto-expiry, round-robin
+  ordering, runtime snapshots, failure tracking. FrankClaw has single-key-per-provider auth.
+
+- [ ] **Vector Memory Backend** — Persistent memory search
+  OpenClaw's context engine supports vector memory for long-term knowledge retrieval.
+  FrankClaw has a `frankclaw-memory` crate with traits defined but no backend.
+
+### Channel Features
+
+- [ ] **Polls** — Cross-channel poll creation
+  OpenClaw supports creating polls on Telegram (open_period) and Discord (duration_hours)
+  with question/options normalization, multi-selection, channel-specific limits. FrankClaw
+  has no poll support.
+
+- [ ] **WhatsApp Web** — Baileys/WA Web Socket channel
+  OpenClaw has a separate WhatsApp Web channel via Baileys (WA Web socket), distinct from
+  the Cloud API. FrankClaw only has Cloud API.
+
+### Secrets & Security
+
+- [ ] **Secrets Management** — Full secrets audit and management
+  OpenClaw has secret audit, auth profile scanning, credential matrix, JSON pointer
+  resolution, configure plan, runtime auth collectors, provider env var mapping.
+  FrankClaw has `SecretString` wrapping but no secrets audit/management CLI.
+
+- [ ] **Security Audit** — Automated config security scanning
+  OpenClaw has automated security scanning: dangerous config flags, mutable allowlist
+  detectors, skill scanner, safe regex validation, external content analysis, tool
+  policy audit. FrankClaw has SSRF protection and input validation but no automated
+  security scanning.
+
+### Operator Experience
+
+- [ ] **Full Daemon Management** — Cross-platform service management
+  OpenClaw has systemd unit generation, launchd plist generation, Windows schtasks,
+  service audit, runtime binary discovery, service environment management. FrankClaw
+  has basic systemd unit output.
+
+- [ ] **Interactive Wizard/Onboarding** — Guided setup
+  OpenClaw has an interactive wizard with Clack prompts for gateway config, secret input,
+  completion flows, channel setup. FrankClaw has CLI config commands but no interactive
+  wizard.
+
+- [ ] **Doctor Diagnostics** — Deep health checks
+  OpenClaw's `doctor` command covers config analysis, legacy migration, memory search,
+  session locks, state integrity, workspace status, bootstrap size, daemon flows, security
+  checks. FrankClaw has basic `health` checks.
+
+### Rich Channel Behavior (Previously Checked — Done)
 
 - [x] Rich attachment/media handling across supported channels
-  Audited and hardened: Telegram caption overflow with fallback, parse-mode retry, thread-not-found DM fallback, message-not-modified idempotency. Discord 2000-char chunking, fatal close code handling. Slack fatal auth classification. WhatsApp message type filtering, error code classification. Signal mention ORC replacement, E.164 normalization, self-echo prevention. SSRF redirect chain validation across all media fetches.
 - [x] Broader edit support beyond Telegram
 - [x] Delete support where platforms allow it
 - [x] Shared outbound text normalization and reply-safe formatting
 - [x] Channel-specific streaming or pseudo-streaming delivery
-- [x] Provider SSE streaming for OpenAI/Anthropic-backed chat turns
-- [x] Provider SSE streaming for other configured providers (Ollama now streams via OpenAI-compatible SSE)
 - [x] Explicit group allowlist routing on supported group-capable channels
 - [x] Better reply-tag semantics across supported channels
-- [x] Better WhatsApp-specific behavior beyond normalized inbound media/webhook handling and safer outbound text shaping
+- [x] Better WhatsApp-specific behavior
 - [x] Broader platform-specific retry/backoff semantics
 
-### Canvas Depth
+### Canvas Depth (Previously Checked — Done)
 
-- [x] Structured Canvas document model beyond title/body text
+- [x] Structured Canvas document model with revision conflict detection
 - [x] Session-linked Canvas workflows
-- [x] Incremental Canvas patches instead of full-document replace
+- [x] Incremental Canvas patches
 - [x] Multiple canvases or per-session canvases
 - [x] Safer agent-driven UI blocks/components
 - [x] Snapshot/export flows
 - [x] A2UI-style richer host capabilities
 
-### Tool Depth
+### Tool Depth (Previously Checked — Done)
 
-- [x] Browser automation runtime
-- [x] Browser session/profile management
+- [x] Browser automation runtime with CDP timeout and SSRF guards
+- [x] Browser session/profile management with dead session recovery
 - [x] Visual/browser snapshots
 - [x] Safer action model for clicks/forms/navigation
 - [x] Tool approvals for higher-risk tool families
 - [x] More first-party tools beyond session inspection
 - [x] Better tool tracing and operator visibility
 
-### Deferred Runtime Depth
+### Test Coverage
 
-- [ ] Sandboxed agent runtime execution surface
-- [ ] Vector memory backend
-
-### Operator / Install
-
-- [x] Docker support and documented container flow
-- [x] Easier channel setup flows
-- [x] Better channel/provider setup verification in `doctor`
-- [x] Better deployment docs and examples
-- [x] Config examples per supported channel
-- [x] Service/install guidance beyond `systemd` output
-
-### Test Coverage and Test Quality
-
-- [x] More integration coverage across supported channels
+- [x] Integration coverage across supported channels
 - [x] Gateway-path coverage for authenticated web media upload/inbound flows
-- [x] Better end-to-end coverage for operator flows
+- [x] End-to-end coverage for operator flows
 - [x] External-API contract fixtures for supported channels
-- [x] More failure-path tests for provider failover and retries
+- [x] Failure-path tests for provider failover and retries
 - [x] Coverage for Canvas RPC/UI behavior
-- [x] Unit and gateway coverage for Canvas export snapshots
-- [x] Unit coverage for bounded Canvas component blocks
 - [x] Coverage for onboarding/install helpers
 - [x] Regression-focused tests for delivery metadata and session rewrites
 - [ ] Live smoke coverage against real external platforms
-- [x] More media-specific failure-path coverage for partial multi-attachment delivery
+- [x] Media-specific failure-path coverage for partial multi-attachment delivery
 
-### Not Implemented Yet in the Current Direction
-
-- [ ] Sandboxed agent runtime execution surface
-- [ ] Vector memory backend
-- [x] Provider SSE streaming outside the current OpenAI/Anthropic path (Ollama)
-- [ ] Remaining long-tail media/channel edge cases listed above
-
-### Still Missing OpenClaw Breadth
+### Still Missing OpenClaw Channel Breadth
 
 - [ ] Google Chat
 - [ ] BlueBubbles / iMessage
@@ -142,18 +254,49 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [ ] Companion nodes and apps
 - [ ] Voice
 
-## Explicitly Lower Priority Right Now
+## Priority Tiers
 
-- Wider long-tail channel parity
-- Sandboxed agent runtime
-- Vector memory backend
+### Tier 1 — Core Intelligence (high impact, needed for competitive parity)
+
+1. Context engine with compaction (conversations break on long sessions without this)
+2. Media understanding pipeline (vision/audio — table-stakes for modern AI assistants)
+3. System prompt construction (dynamic prompts are essential for agent quality)
+4. Link understanding (low effort, high value for conversational context)
+
+### Tier 2 — Advanced Agent Capabilities
+
+5. Subagent system (enables complex multi-step workflows)
+6. Auto-reply command system (richer interaction model)
+7. Model catalog/discovery (broader provider support)
+8. Auth profile rotation (production reliability)
+
+### Tier 3 — Extensibility
+
+9. Hooks system (foundation for extensibility)
+10. Skills system (community contribution)
+11. ACP protocol (standard interop)
+12. Bash tools with sandboxing (powerful but needs security care)
+
+### Tier 4 — Nice-to-Have
+
+13. TTS (voice output)
+14. Polls (channel-specific feature)
+15. WhatsApp Web (niche alternative to Cloud API)
+16. Gmail integration (niche hook)
+17. Full daemon management across platforms (launchd, schtasks beyond systemd)
+18. Interactive wizard/onboarding
+19. Deep doctor diagnostics
+20. i18n / multi-locale support (OpenClaw has EN, ZH, PT-BR, DE, ES)
+21. Device pairing with network discovery (Bonjour/mDNS, Tailscale)
+22. Markdown IR with channel-specific rendering (WhatsApp, LINE formatters)
+23. Process management with lane-based task queueing and concurrency control
+24. Auto-update system with release channels
+
+### Deferred / Lower Priority
+
+- Wider long-tail channel parity (Google Chat, iMessage, IRC, Teams, Matrix, etc.)
 - Companion node/app surfaces
 - Voice
 - Distro-specific installers
-
-## Near-Term Priority Order
-
-1. Finish the remaining long-tail media/channel edge cases on supported channels.
-2. Add more live-ish test coverage for real external platform behavior.
-3. Keep sandboxed agent runtime on the deferred list until the current surface stops moving.
-4. Keep vector memory backend on the deferred list until the runtime/tool surface settles.
+- Secrets audit CLI
+- Full TUI (FrankClaw has basic console; OpenClaw has full interactive client with session tabs, token display, syntax highlighting)

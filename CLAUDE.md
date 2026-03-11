@@ -84,6 +84,19 @@ The binary is at `target/debug/frankclaw` (or `target/release/frankclaw`).
 3. Register in `crates/frankclaw-models/src/lib.rs`
 4. Add to `FailoverChain` in CLI startup
 
+## Parity Work Process
+
+When working through `PARITY_TODO.md` features:
+
+1. **One feature at a time** — complete, test, commit before starting the next.
+2. **Compare with OpenClaw** (`openclaw/` directory) for functional requirements, but do NOT copy 1:1. Prefer Rust idioms, slim design, and security hardening over feature-identical ports.
+3. **Drop what's unnecessary** — if an OpenClaw feature is over-engineered, Node-specific, or adds complexity without clear value, skip it and note why in the TODO.
+4. **Add tests** for every new feature. Tests must pass before committing.
+5. **Commit per feature** with a clear message describing what was added.
+6. **Update `PARITY_TODO.md`** — mark the feature done and add notes on what was implemented vs dropped.
+7. **Follow priority order** in `PARITY_TODO.md` (Tier 1 → Tier 2 → Tier 3 → Tier 4).
+8. **Frontend**: if UI is needed, keep it slim (TypeScript + Tailwind, no heavy frameworks).
+
 ## CI Expectations
 
 - `cargo check` must pass with zero errors
