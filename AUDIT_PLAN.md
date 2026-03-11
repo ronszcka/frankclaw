@@ -12,19 +12,31 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## Audit Order
 
-1. [Telegram Channel](#1-telegram-channel)
-2. [Discord Channel](#2-discord-channel)
-3. [Slack Channel](#3-slack-channel)
-4. [WhatsApp Channel](#4-whatsapp-channel)
-5. [Signal Channel](#5-signal-channel)
-6. [Model Providers](#6-model-providers)
-7. [Gateway & Media](#7-gateway--media)
+### Phase 1 — Channels, Providers, Gateway (DONE)
+
+1. [Telegram Channel](#1-telegram-channel) — DONE
+2. [Discord Channel](#2-discord-channel) — DONE
+3. [Slack Channel](#3-slack-channel) — DONE
+4. [WhatsApp Channel](#4-whatsapp-channel) — DONE
+5. [Signal Channel](#5-signal-channel) — DONE
+6. [Model Providers](#6-model-providers) — DONE
+7. [Gateway & Media](#7-gateway--media) — DONE
+
+### Phase 2 — Runtime, Tools, Sessions, Crypto, Infra
+
+8. [Runtime & Orchestration](#8-runtime--orchestration) — TODO
+9. [Browser Automation & Tools](#9-browser-automation--tools) — TODO
+10. [Session Management](#10-session-management) — TODO
+11. [Canvas](#11-canvas) — TODO
+12. [Crypto & Auth](#12-crypto--auth) — TODO
+13. [Cron Service](#13-cron-service) — TODO
+14. [Webhooks & Config Reload](#14-webhooks--config-reload) — TODO
 
 ---
 
 ## 1. Telegram Channel
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -57,7 +69,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 2. Discord Channel
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -92,7 +104,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 3. Slack Channel
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -125,7 +137,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 4. WhatsApp Channel
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -163,7 +175,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 5. Signal Channel
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -199,7 +211,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 6. Model Providers
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -230,7 +242,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 7. Gateway & Media
 
-**Status:** IN PROGRESS
+**Status:** DONE
 
 ### Critical
 
@@ -256,6 +268,208 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 - [ ] **Trusted proxy header validation**: Deferred — currently only trusts Tailscale and explicitly configured proxy headers.
 - [x] **Leading-dot stripping in filenames**: Already implemented in `sanitize_filename()`. `.bashrc` → `bashrc`, `...` → `unnamed`.
 - [x] **Media UUID-based deduplication**: Already implemented — on-disk files use `{uuid}.{ext}` format with original name stored in metadata sidecar.
+
+---
+
+## 8. Runtime & Orchestration
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **Tool call loop detection**: Detect identical tool+params repeated calls. Warn at 10 repetitions, hard block at 20. Hash both params AND result to detect "same call, no progress" patterns. Track a sliding window of the last 30 tool calls.
+- [ ] **Context overflow with retry**: When model returns context_length_exceeded, attempt compaction (drop old transcript entries) then retry. Limit to 32 retries. If overflow persists after compaction, attempt tool-result truncation before giving up.
+
+### High
+
+- [ ] **Tool result truncation**: Cap single tool result at 30% of context window or 400K chars (whichever is smaller). When truncating, preserve head + intelligent tail detection (error patterns, JSON structure, summary lines). Insert omission marker. Always keep minimum 2K chars.
+- [ ] **Streaming error mid-turn**: If a streaming error occurs after content has been emitted, surface the error to the user and DO NOT retry the turn (partial content already delivered). Only retry if zero content was streamed.
+- [ ] **Agent turn safety timeout**: Hard safety timeout per agent turn (default 60 minutes). Prevents zombie turns from holding resources indefinitely. Separate from per-model request timeout.
+- [ ] **Ping-pong tool detection**: Detect alternating tool call patterns with stable identical outcomes on each side. Require minimum 2 stable rounds before flagging.
+
+### Medium
+
+- [ ] **Tool call concurrency limit**: When model requests multiple parallel tool calls, cap concurrent execution (e.g., 8 at a time). Prevents resource exhaustion from a model that requests 50 simultaneous calls.
+- [ ] **Transcript compaction strategy**: When context approaches limit, summarize older entries rather than truncating. Preserve system message, most recent N user/assistant turns, and all pending tool results.
+- [ ] **Model fallback on streaming**: If primary model fails during streaming before any bytes are emitted, fall back to next model transparently. Already partially implemented in failover.rs but verify edge cases.
+
+### Low
+
+- [ ] **Turn metadata tracking**: Record model_id, token usage, tool calls, and duration per turn for observability. Fire-and-forget to avoid blocking the response path.
+- [ ] **Skill validation at runtime**: Re-validate skill manifests when tool registry changes (e.g., after config reload). Stale skill references should log warnings, not crash.
+
+---
+
+## 9. Browser Automation & Tools
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **CDP timeout clamping**: Differentiate loopback vs remote browser profiles. Loopback gets shorter defaults (300-800ms HTTP, 200-2000ms WS). Remote enforces minimum timeouts even when callers pass lower values. Validate timeouts as finite positive integers; clamp to 1ms minimum.
+- [ ] **Page crash recovery**: When a CDP target crashes or disconnects, clean up the session registry entry. Do NOT leave zombie entries that block new sessions for the same key.
+
+### High
+
+- [ ] **Session state buffer limits**: Cap per-page tracked state: max 500 console messages, 200 page errors, 500 network requests. Use sliding window buffer. Prevents unbounded memory growth during long browser sessions.
+- [ ] **Mutation approval enforcement**: Browser mutation tools (click, type, press) require explicit operator approval via environment variable. Verify the check cannot be bypassed through tool registry manipulation.
+- [ ] **Navigation SSRF guard**: Validate browser navigation URLs through the same SSRF checker used for media fetches. Block navigation to private/internal IPs.
+- [ ] **Screenshot error recovery**: If screenshot capture fails (e.g., page navigated away during capture), return a descriptive error instead of crashing. Retry once after a short delay.
+
+### Medium
+
+- [ ] **CDP WebSocket reconnection**: If the DevTools WebSocket drops, attempt reconnection with backoff before declaring the session dead. Preserve session state across reconnections.
+- [ ] **Error message rewriting**: Transform Playwright/CDP-native errors (strict mode violations, visibility timeouts, covered elements) into actionable agent-facing messages.
+- [ ] **Frame selector caching**: Cache role-based element refs per CDP target (max 50 targets). Prevents stale selector references across page navigations.
+- [ ] **Concurrent browser session limit**: Cap total active browser sessions (e.g., 10). Reject new session requests when at capacity instead of allowing unbounded growth.
+
+### Low
+
+- [ ] **Browser tool audit logging**: Log all browser tool invocations to the audit log target. Include tool name, selector (if applicable), session_id, and outcome.
+- [ ] **Page resource tracking**: Track total downloaded bytes per page session. Warn when exceeding threshold (e.g., 100MB).
+
+---
+
+## 10. Session Management
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **Concurrent transcript append safety**: Verify that concurrent `append_transcript` calls from different tasks are properly serialized by SQLite WAL mode. Add a regression test with parallel appends.
+- [ ] **Encryption key rotation**: When master key changes, existing encrypted transcripts become unreadable. Detect this condition (decryption failure) and surface a clear error instead of panicking.
+
+### High
+
+- [ ] **Session pruning with active reference check**: Before pruning old sessions, verify they are not currently in use by an active agent turn. Maintain a set of active session keys.
+- [ ] **Transcript entry size limit**: Cap individual transcript entries at a reasonable size (e.g., 1MB). Reject oversized entries before attempting encryption and storage.
+- [ ] **Session store file locking**: Verify SQLite WAL mode handles concurrent reads during writes correctly. Add regression test for read-during-write scenario.
+- [ ] **Secure delete verification**: `PRAGMA secure_delete = ON` zeros deleted data, but verify this works with WAL mode (WAL pages may contain unzeroed copies until checkpoint).
+
+### Medium
+
+- [ ] **Archived transcript cleanup**: When deleting sessions, also clean up any associated media files, canvas documents, and cron jobs.
+- [ ] **Session metadata indexes**: Verify indexes on (channel, account_id) and last_message_at are used by common queries. Add EXPLAIN QUERY PLAN assertions in tests.
+- [ ] **Connection pool exhaustion**: When all 8 r2d2 connections are busy, new requests block. Add timeout on pool checkout (e.g., 5 seconds) instead of blocking indefinitely.
+
+### Low
+
+- [ ] **Migration idempotency**: Verify that running migrations multiple times is safe (IF NOT EXISTS on all CREATE statements).
+- [ ] **Transcript pagination cursor stability**: Ensure cursor-based pagination is stable when new entries are appended during iteration.
+
+---
+
+## 11. Canvas
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **Canvas document size limit**: Cap total document size (title + body + all blocks) at a reasonable limit (e.g., 1MB). Prevent memory exhaustion from unbounded canvas growth.
+- [ ] **Block content validation**: Validate block content types match their kind (e.g., Checklist blocks should contain checklist-structured content, Code blocks should have language metadata).
+
+### High
+
+- [ ] **Canvas patch conflict detection**: When applying patches, verify the revision number matches the current document revision. Reject stale patches to prevent lost updates.
+- [ ] **Export sanitization**: When exporting canvas to Markdown, sanitize block content to prevent injection of malicious markdown (e.g., link injection, script tags in HTML-rendered markdown).
+- [ ] **Canvas persistence**: Currently in-memory only (RwLock<HashMap>). Add optional disk persistence for canvas documents so they survive gateway restarts.
+
+### Medium
+
+- [ ] **Block count limit**: Cap the number of blocks per document (e.g., 200). Prevents performance degradation from very large documents.
+- [ ] **Canvas access scoping**: Canvas documents are accessible to any Editor+ role. Consider session-scoped canvases that restrict access to the creating session.
+- [ ] **Canvas clear authorization**: Verify that `canvas.clear` requires Admin role, not just Editor. Clearing all documents is a destructive operation.
+
+### Low
+
+- [ ] **Export format extensibility**: Support additional export formats beyond JSON and Markdown (e.g., HTML, plain text).
+- [ ] **Canvas event broadcast**: Broadcast canvas change events to connected clients for real-time collaboration.
+
+---
+
+## 12. Crypto & Auth
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **Nonce uniqueness guarantee**: ChaCha20-Poly1305 nonce is 96 bits, generated randomly. With high message volume, birthday collision risk exists around 2^48 messages. Verify nonce generation uses a CSPRNG and consider adding a counter component.
+- [ ] **Timing-safe comparison coverage**: Audit all credential comparison code paths. Verify `verify_token_eq()` is used consistently — no raw `==` comparison on secrets anywhere.
+
+### High
+
+- [ ] **Key derivation salt uniqueness**: `derive_subkey()` uses HMAC-SHA256 with context string. Verify each context string is unique across all derivation call sites (e.g., "session", "config", "media" must not overlap).
+- [ ] **Argon2id parameter validation**: Verify Argon2id parameters (t=3, m=64MB, p=4) match OWASP recommendations. Ensure password hashing doesn't block the async runtime (should run in spawn_blocking).
+- [ ] **Master key zeroing on drop**: Verify `MasterKey` implements `ZeroizeOnDrop` and test that memory is actually zeroed after drop (may need unsafe test code or external tool verification).
+- [ ] **Rate limiter bypass prevention**: Verify the auth rate limiter cannot be bypassed by rotating source IPs. Consider account-level rate limiting in addition to IP-level.
+
+### Medium
+
+- [ ] **Clock skew tolerance for device auth**: If device pairing uses timestamps, allow reasonable clock skew (±120 seconds). Validate timestamps are not in the far future.
+- [ ] **Token entropy verification**: Verify `generate_token()` produces 256 bits of entropy. Test that generated tokens pass basic randomness checks (no obvious patterns, correct base64url encoding length).
+
+### Low
+
+- [ ] **Crypto error messages**: Ensure crypto error messages never leak key material, plaintext, or nonce values. Only report error type and context.
+- [ ] **PHC format compatibility**: Verify Argon2id PHC-format hash strings are compatible with standard tools (e.g., `argon2` CLI) for debugging and migration.
+
+---
+
+## 13. Cron Service
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **Job timeout enforcement**: Each cron job needs a hard timeout (default 10 minutes, max 60 minutes). Without this, a stuck job blocks the cron executor indefinitely.
+- [ ] **Concurrent execution prevention**: Ensure the same job cannot run concurrently. If a previous run is still active when the next tick fires, skip the tick and log a warning.
+
+### High
+
+- [ ] **Missed-fire policy**: When the cron service starts after being down, it should NOT retroactively fire all missed executions. Only fire on the next scheduled tick.
+- [ ] **Session reaper throttling**: Sweep expired cron-run sessions at most every 5 minutes. Track last sweep time to avoid excessive I/O on every tick.
+- [ ] **Cron expression edge cases**: Test edge cases: `@monthly` on months without the 31st, DST transitions, leap seconds, `@yearly` on Feb 29.
+- [ ] **File lock safety**: When persisting jobs to JSON, ensure file locking prevents data loss from concurrent writes (e.g., two cron ticks racing on persistence).
+
+### Medium
+
+- [ ] **Job error reporting**: When a cron job fails, include the error message in the RunLog. Surface job failures through the health endpoint or audit log.
+- [ ] **Retention period parsing**: Support human-readable duration strings for session retention (e.g., "24h", "7d"). Validate and fall back to defaults on parse error.
+- [ ] **Job payload validation**: Validate cron job prompts are non-empty, agent_id references a valid agent, and session_key is well-formed.
+
+### Low
+
+- [ ] **Cron service graceful shutdown**: Verify CancellationToken properly interrupts the 60-second tick sleep. In-progress jobs should be allowed to complete (with timeout) before shutdown.
+- [ ] **Job history pruning**: Limit stored RunLog history per job (e.g., keep last 100 runs). Prevent unbounded growth of run history.
+
+---
+
+## 14. Webhooks & Config Reload
+
+**Status:** TODO
+
+### Critical
+
+- [ ] **Webhook signature validation**: Verify incoming webhook payloads using HMAC-SHA256 with the configured secret. Use constant-time comparison. Reject unsigned payloads when a secret is configured.
+- [ ] **Webhook replay prevention**: Include timestamp in webhook signatures. Reject webhooks older than 5 minutes to prevent replay attacks.
+
+### High
+
+- [ ] **Webhook body size limit**: Enforce a maximum body size for incoming webhooks (e.g., 1MB). Reject oversized payloads before parsing.
+- [ ] **Config reload debouncing**: When file changes trigger rapidly (e.g., editor save), debounce the reload to avoid thrashing. Current 2-second poll interval provides some natural debouncing, but verify rapid changes don't cause issues.
+- [ ] **Config validation before swap**: Verify the new config is fully validated (all required fields present, references resolve) before swapping via ArcSwap. Invalid config should be logged and rejected, not applied.
+- [ ] **Restart-sensitive change detection**: When config changes require a full restart (e.g., bind address, auth mode), log a clear message and optionally trigger graceful shutdown instead of silently applying partial changes.
+
+### Medium
+
+- [ ] **Webhook error response**: Return appropriate HTTP status codes for webhook processing errors (400 for bad payload, 401 for invalid signature, 429 for rate limited, 500 for internal errors).
+- [ ] **Config diff logging**: Log what changed in a config reload (added/removed channels, changed models, etc.) for operator visibility.
+- [ ] **Deep equality for config comparison**: When checking if config changed, use deep structural comparison rather than file modification timestamp alone. Prevents false-positive reloads when the file is touched but content is unchanged.
+
+### Low
+
+- [ ] **Webhook retry support**: For outgoing webhooks, implement retry with exponential backoff on 5xx responses.
+- [ ] **Config schema versioning**: Support config file versioning to enable forward-compatible migrations.
 
 ---
 
