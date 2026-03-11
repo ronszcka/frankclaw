@@ -36,7 +36,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Operator health, remote exposure, onboarding, and systemd helpers
 - [x] Normalized inbound media placeholders on supported channels
 - [x] Chromium-backed browser session tools (`open`, `extract`, `snapshot`)
-- [x] Selector-based browser actions (`click`, `type`)
+- [x] Selector-based browser actions (`click`, `type`, `wait`)
 - [x] Browser session visibility and close control (`sessions`, `close`)
 
 ## Implemented Channels

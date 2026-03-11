@@ -57,6 +57,7 @@ impl ToolRegistry {
         registry.register(Arc::new(BrowserSnapshotTool::new(browser.clone())));
         registry.register(Arc::new(BrowserClickTool::new(browser.clone())));
         registry.register(Arc::new(BrowserTypeTool::new(browser.clone())));
+        registry.register(Arc::new(BrowserWaitTool::new(browser.clone())));
         registry.register(Arc::new(BrowserSessionsTool::new(browser.clone())));
         registry.register(Arc::new(BrowserCloseTool::new(browser)));
         registry
@@ -332,6 +333,51 @@ impl BrowserClient {
         self.snapshot_session(&session).await
     }
 
+    async fn wait_for(
+        &self,
+        session_id: &str,
+        selector: Option<&str>,
+        text: Option<&str>,
+        timeout_ms: u64,
+    ) -> Result<BrowserSnapshot> {
+        if selector.is_none() && text.is_none() {
+            return Err(FrankClawError::InvalidRequest {
+                msg: "browser.wait requires selector or text".into(),
+            });
+        }
+
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: format!("browser session '{}' was not opened yet", session_id),
+            })?;
+        let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
+        self.wait_for_ready(&mut socket).await?;
+
+        let expression = wait_expression(selector, text);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(timeout_ms.clamp(50, 30_000));
+        loop {
+            if self.evaluate_bool(&mut socket, &expression).await? {
+                return self.snapshot_session(&session).await;
+            }
+            if std::time::Instant::now() >= deadline {
+                let target = selector
+                    .map(|value| format!("selector '{}'", value))
+                    .or_else(|| text.map(|value| format!("text '{}'", value)))
+                    .unwrap_or_else(|| "condition".into());
+                return Err(FrankClawError::AgentRuntime {
+                    msg: format!("browser.wait timed out waiting for {target}"),
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     async fn create_target(&self, url: &str) -> Result<DevtoolsTarget> {
         let mut endpoint = self.base_url.join("json/new").map_err(|err| FrankClawError::Internal {
             msg: format!("invalid browser endpoint: {err}"),
@@ -537,6 +583,9 @@ struct BrowserClickTool {
 struct BrowserTypeTool {
     client: Arc<BrowserClient>,
 }
+struct BrowserWaitTool {
+    client: Arc<BrowserClient>,
+}
 struct BrowserSessionsTool {
     client: Arc<BrowserClient>,
 }
@@ -569,6 +618,12 @@ impl BrowserClickTool {
 }
 
 impl BrowserTypeTool {
+    fn new(client: Arc<BrowserClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl BrowserWaitTool {
     fn new(client: Arc<BrowserClient>) -> Self {
         Self { client }
     }
@@ -805,6 +860,50 @@ impl Tool for BrowserTypeTool {
 }
 
 #[async_trait]
+impl Tool for BrowserWaitTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "browser.wait".into(),
+            description: "Wait for a CSS selector or visible text to appear in an existing Chromium-backed browser session.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional browser session identifier. Defaults to the current chat session." },
+                    "selector": { "type": "string", "description": "CSS selector that must resolve before continuing." },
+                    "text": { "type": "string", "description": "Visible text snippet that must appear before continuing." },
+                    "timeout_ms": { "type": "integer", "minimum": 50, "maximum": 30000, "description": "Maximum time to wait before failing." }
+                }
+            }),
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let session_id = self
+            .client
+            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let selector = args
+            .get("selector")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let text = args
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(5_000);
+        let snapshot = self
+            .client
+            .wait_for(&session_id, selector, text, timeout_ms)
+            .await?;
+        Ok(snapshot_result(snapshot, false, 1000))
+    }
+}
+
+#[async_trait]
 impl Tool for BrowserSessionsTool {
     fn definition(&self) -> ToolDef {
         ToolDef {
@@ -889,6 +988,18 @@ fn type_expression(selector: &str, text: &str) -> String {
     let text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
     format!(
         "(function() {{ const el = document.querySelector({selector}); if (!el) return false; el.focus(); if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()"
+    )
+}
+
+fn wait_expression(selector: Option<&str>, text: Option<&str>) -> String {
+    let selector = selector
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()))
+        .unwrap_or_else(|| "null".into());
+    let text = text
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()))
+        .unwrap_or_else(|| "null".into());
+    format!(
+        "(function() {{ const selector = {selector}; const text = {text}; const hasSelector = !selector || !!document.querySelector(selector); const bodyText = document.body ? document.body.innerText : ''; const hasText = !text || bodyText.includes(text); return hasSelector && hasText; }})()"
     )
 }
 
@@ -1110,6 +1221,7 @@ mod tests {
         registry.register(Arc::new(BrowserSnapshotTool::new(client.clone())));
         registry.register(Arc::new(BrowserClickTool::new(client.clone())));
         registry.register(Arc::new(BrowserTypeTool::new(client.clone())));
+        registry.register(Arc::new(BrowserWaitTool::new(client.clone())));
         registry.register(Arc::new(BrowserSessionsTool::new(client.clone())));
         registry.register(Arc::new(BrowserCloseTool::new(client)));
 
@@ -1124,6 +1236,7 @@ mod tests {
             "browser.snapshot".into(),
             "browser.click".into(),
             "browser.type".into(),
+            "browser.wait".into(),
             "browser.sessions".into(),
             "browser.close".into(),
         ];
@@ -1198,6 +1311,21 @@ mod tests {
                 .expect("text should exist")
                 .contains("Typed frankclaw")
         );
+
+        let waited = registry
+            .invoke_allowed(
+                &allowed,
+                "browser.wait",
+                serde_json::json!({ "text": "Typed frankclaw", "timeout_ms": 250 }),
+                ToolContext {
+                    agent_id: AgentId::default_agent(),
+                    session_key: Some(SessionKey::from_raw("default:web:browser")),
+                    sessions: Arc::new(MockSessionStore::default()),
+                },
+            )
+            .await
+            .expect("browser.wait should succeed");
+        assert_eq!(waited.output["title"], serde_json::json!("Typed"));
 
         let sessions = registry
             .invoke_allowed(
@@ -1284,6 +1412,10 @@ mod tests {
                             document.title = "Clicked";
                             status.textContent = "Clicked " + query.value;
                           });
+                          setTimeout(() => {
+                            document.body.dataset.ready = "1";
+                            status.textContent = "Loaded";
+                          }, 150);
                         </script>
                       </body>
                     </html>"#,
@@ -1306,6 +1438,7 @@ mod tests {
             "browser.snapshot".into(),
             "browser.click".into(),
             "browser.type".into(),
+            "browser.wait".into(),
             "browser.sessions".into(),
             "browser.close".into(),
         ];
@@ -1320,6 +1453,22 @@ mod tests {
             .await
             .expect("browser.open should succeed against real chromium");
         assert_eq!(opened.output["title"], serde_json::json!("Ready"));
+
+        let waited = registry
+            .invoke_allowed(
+                &allowed,
+                "browser.wait",
+                serde_json::json!({ "selector": "body[data-ready='1']", "text": "Loaded", "timeout_ms": 2_000 }),
+                ctx.clone(),
+            )
+            .await
+            .expect("browser.wait should succeed against real chromium");
+        assert!(
+            waited.output["text"]
+                .as_str()
+                .expect("text should exist")
+                .contains("Loaded")
+        );
 
         let typed = registry
             .invoke_allowed(
@@ -1473,6 +1622,10 @@ mod tests {
                             *state.title.lock().await = "Typed".into();
                             *state.text.lock().await = format!("Typed {typed}");
                             serde_json::json!(true)
+                        }
+                        expression if expression.contains("const selector = ") => {
+                            let text = state.text.lock().await.clone();
+                            serde_json::json!(text.contains("Typed frankclaw"))
                         }
                         _ => serde_json::json!(""),
                     };

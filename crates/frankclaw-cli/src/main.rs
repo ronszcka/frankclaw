@@ -806,6 +806,7 @@ fn collect_browser_tool_warnings(
                 | "browser.snapshot"
                 | "browser.click"
                 | "browser.type"
+                | "browser.wait"
                 | "browser.sessions"
                 | "browser.close"
         ));

@@ -258,6 +258,7 @@ chromium \
           "browser.snapshot",
           "browser.click",
           "browser.type",
+          "browser.wait",
           "browser.sessions",
           "browser.close"
         ]
@@ -280,6 +281,7 @@ chromium \
 frankclaw tools invoke --tool browser.open --session default:web:control --args '{"url":"https://example.com"}'
 frankclaw tools invoke --tool browser.type --session default:web:control --args '{"selector":"input","text":"frankclaw"}'
 frankclaw tools invoke --tool browser.click --session default:web:control --args '{"selector":"button"}'
+frankclaw tools invoke --tool browser.wait --session default:web:control --args '{"selector":"#results","timeout_ms":2000}'
 frankclaw tools invoke --tool browser.sessions --session default:web:control
 frankclaw tools invoke --tool browser.close --session default:web:control
 ```

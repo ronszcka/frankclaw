@@ -20,7 +20,7 @@ For concrete setup snippets for the supported channels and browser runtime, see 
 - **Encrypted sessions** — SQLite-backed with ChaCha20-Poly1305 encryption at rest
 - **Scheduled jobs** — Cron-based task scheduling with agent delivery
 - **Canvas host** — local authenticated visual workspace surface
-- **Bounded tools** — session inspection plus Chromium-backed `browser.open`, `browser.extract`, `browser.snapshot`, `browser.click`, `browser.type`, `browser.sessions`, and `browser.close`
+- **Bounded tools** — session inspection plus Chromium-backed `browser.open`, `browser.extract`, `browser.snapshot`, `browser.click`, `browser.type`, `browser.wait`, `browser.sessions`, and `browser.close`
 - **Operator support** — doctor, status, remote exposure checks, onboarding, and systemd unit generation
 - **Docker browser runtime** — `docker compose up chromium` starts a local DevTools endpoint for browser tools
 - **Media pipeline** — File handling with SSRF protection and filename sanitization
@@ -233,6 +233,7 @@ Then allow browser tools on an agent:
           "browser.snapshot",
           "browser.click",
           "browser.type",
+          "browser.wait",
           "browser.sessions",
           "browser.close"
         ]
@@ -250,6 +251,7 @@ frankclaw tools invoke --tool browser.extract --session default:web:control
 frankclaw tools invoke --tool browser.snapshot --session default:web:control
 frankclaw tools invoke --tool browser.type --session default:web:control --args '{"selector":"input[name=q]","text":"frankclaw"}'
 frankclaw tools invoke --tool browser.click --session default:web:control --args '{"selector":"button[type=submit]"}'
+frankclaw tools invoke --tool browser.wait --session default:web:control --args '{"selector":"#results","timeout_ms":2000}'
 frankclaw tools invoke --tool browser.sessions --session default:web:control
 frankclaw tools invoke --tool browser.close --session default:web:control
 ```
