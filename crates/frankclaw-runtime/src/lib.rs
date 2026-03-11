@@ -246,8 +246,9 @@ impl Runtime {
             }))
             .collect();
 
-        // Optimize context to fit within the model's token budget.
-        let system_prompt = self.build_system_prompt(&agent_id, &agent);
+        // Build dynamic system prompt with runtime context.
+        let tool_names: Vec<String> = allowed_tools.iter().map(|t| t.name.clone()).collect();
+        let system_prompt = self.build_system_prompt(&agent_id, &agent, &model_id, &tool_names);
         let context_result = context::optimize_context(
             raw_messages,
             &model_def,
@@ -477,27 +478,75 @@ impl Runtime {
         Ok((agent_id, agent))
     }
 
-    fn build_system_prompt(&self, agent_id: &AgentId, agent: &AgentDef) -> Option<String> {
-        let skill_prompts = self
+    fn build_system_prompt(
+        &self,
+        agent_id: &AgentId,
+        agent: &AgentDef,
+        model_id: &str,
+        tool_names: &[String],
+    ) -> Option<String> {
+        let mut sections: Vec<String> = Vec::new();
+
+        // Section 1: Identity
+        sections.push(format!(
+            "You are {}, a personal AI assistant running inside FrankClaw.",
+            agent.name
+        ));
+
+        // Section 2: User-defined system prompt (highest priority content)
+        if let Some(prompt) = agent.system_prompt.as_deref() {
+            let trimmed = prompt.trim();
+            if !trimmed.is_empty() {
+                sections.push(trimmed.to_string());
+            }
+        }
+
+        // Section 3: Available tools
+        if !tool_names.is_empty() {
+            let tool_list = tool_names.join(", ");
+            sections.push(format!(
+                "You have access to the following tools: {tool_list}. \
+                 Use them when they would help answer the user's request. \
+                 Do not call tools unnecessarily or repeatedly with the same arguments."
+            ));
+        }
+
+        // Section 4: Skills
+        let skill_prompts: Vec<String> = self
             .skill_manifests
             .get(agent_id)
             .map(|skills| {
                 skills
                     .iter()
                     .map(|skill| format!("[Skill: {}]\n{}", skill.name, skill.prompt.trim()))
-                    .collect::<Vec<_>>()
+                    .collect()
             })
             .unwrap_or_default();
+        if !skill_prompts.is_empty() {
+            sections.push(skill_prompts.join("\n\n"));
+        }
 
-        match (agent.system_prompt.as_deref(), skill_prompts.is_empty()) {
-            (None, true) => None,
-            (Some(system), true) => Some(system.to_string()),
-            (None, false) => Some(skill_prompts.join("\n\n")),
-            (Some(system), false) => Some(format!(
-                "{}\n\n{}",
-                system.trim(),
-                skill_prompts.join("\n\n")
-            )),
+        // Section 5: Safety
+        sections.push(
+            "Do not attempt to bypass security measures, access unauthorized resources, \
+             or execute actions beyond what the user explicitly requests."
+                .to_string(),
+        );
+
+        // Section 6: Runtime context
+        let now = Utc::now();
+        sections.push(format!(
+            "Runtime: agent={}, model={}, date={}, tools={}",
+            agent_id,
+            model_id,
+            now.format("%Y-%m-%d %H:%M UTC"),
+            tool_names.len(),
+        ));
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
         }
     }
 
