@@ -56,6 +56,15 @@ pub struct ToolRequest {
     pub arguments: serde_json::Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolActivity {
+    pub seq: u64,
+    pub tool_name: String,
+    pub tool_call_id: Option<String>,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub output_preview: String,
+}
+
 const MAX_TOOL_ROUNDS: usize = 4;
 const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 
@@ -139,6 +148,21 @@ impl Runtime {
             .get(&agent_id)
             .map(|skills| skills.as_slice())
             .unwrap_or(&[]))
+    }
+
+    pub fn agent_surface(
+        &self,
+    ) -> impl Iterator<Item = (&AgentId, &AgentDef, &[SkillManifest])> {
+        self.config.agents.agents.iter().map(|(agent_id, agent)| {
+            (
+                agent_id,
+                agent,
+                self.skill_manifests
+                    .get(agent_id)
+                    .map(|skills| skills.as_slice())
+                    .unwrap_or(&[]),
+            )
+        })
     }
 
     pub fn session_key_for_inbound(
@@ -327,6 +351,37 @@ impl Runtime {
             .await
     }
 
+    pub async fn tool_activity(
+        &self,
+        session_key: &SessionKey,
+        limit: usize,
+    ) -> Result<Vec<ToolActivity>> {
+        let entries = self
+            .sessions
+            .get_transcript(session_key, limit.saturating_mul(4).max(1), None)
+            .await?;
+        let mut activity = entries
+            .into_iter()
+            .filter(|entry| entry.role == Role::Tool)
+            .filter_map(|entry| {
+                let metadata = entry.metadata.as_ref()?;
+                let tool_name = metadata["tool_name"].as_str()?.to_string();
+                Some(ToolActivity {
+                    seq: entry.seq,
+                    tool_name,
+                    tool_call_id: metadata["tool_call_id"].as_str().map(str::to_string),
+                    timestamp: entry.timestamp,
+                    output_preview: summarize_tool_output(&entry.content),
+                })
+            })
+            .collect::<Vec<_>>();
+        activity.sort_by_key(|entry| entry.seq);
+        if activity.len() > limit {
+            activity = activity.split_off(activity.len() - limit);
+        }
+        Ok(activity)
+    }
+
     fn resolve_agent(&self, requested: Option<&AgentId>) -> Result<(AgentId, AgentDef)> {
         let agent_id = requested
             .cloned()
@@ -477,6 +532,20 @@ fn build_tool_request_message(content: &str, tool_calls: &[ToolCallResponse]) ->
         segments.push(format!("[tool_call:{} {}]", call.name, call.arguments));
     }
     segments.join("\n")
+}
+
+fn summarize_tool_output(content: &str) -> String {
+    let preview = serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("output").cloned())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| content.to_string());
+    let preview = preview.replace('\n', " ");
+    if preview.chars().count() > 120 {
+        format!("{}...", preview.chars().take(120).collect::<String>())
+    } else {
+        preview
+    }
 }
 
 fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Value> {
@@ -996,6 +1065,15 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.role == Role::Tool && message.content.contains("\"entries\"")));
+
+        let activity = runtime
+            .tool_activity(&response.session_key, 10)
+            .await
+            .expect("tool activity should load");
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].tool_name, "session.inspect");
+        assert_eq!(activity[0].tool_call_id.as_deref(), Some("call-1"));
+        assert!(activity[0].output_preview.contains("\"entries\""));
 
         let _ = std::fs::remove_file(temp);
     }

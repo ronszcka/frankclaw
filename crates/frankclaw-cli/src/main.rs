@@ -135,6 +135,17 @@ enum Command {
         args: Option<String>,
     },
 
+    /// Show recent tool activity for one session.
+    ToolsActivity {
+        /// Session key to inspect.
+        #[arg(long)]
+        session: String,
+
+        /// Maximum tool activity entries to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+
     /// List validated skills for an agent.
     SkillsList {
         /// Agent ID to inspect.
@@ -334,6 +345,38 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             println!();
+            println!("Agents:");
+            for (agent_id, agent, skills) in runtime.agent_surface() {
+                println!(
+                    "  {}  model={}  tools={}  skills={}",
+                    agent_id,
+                    agent
+                        .model
+                        .clone()
+                        .or_else(|| config.models.default_model.clone())
+                        .unwrap_or_else(|| "<unset>".into()),
+                    if agent.tools.is_empty() {
+                        "-".into()
+                    } else {
+                        agent.tools.join(", ")
+                    },
+                    if skills.is_empty() {
+                        "-".into()
+                    } else {
+                        skills
+                            .iter()
+                            .map(|skill| skill.id.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                );
+            }
+            if let Some(browser_status) = browser_runtime_status(&config, std::env::var("FRANKCLAW_BROWSER_DEVTOOLS_URL").ok().as_deref()) {
+                println!();
+                println!("Browser:");
+                println!("  {}", browser_status);
+            }
+            println!();
             println!("Channels:");
             for (channel_id, channel) in channels.channels() {
                 println!("  {}  {:?}", channel_id, channel.health().await);
@@ -522,6 +565,35 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&output.output)?);
+        }
+
+        Command::ToolsActivity { session, limit } => {
+            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            config.validate()?;
+            let sessions = open_sessions(&state_dir)?;
+            let runtime = build_runtime(&config, sessions).await?;
+            let activity = runtime
+                .tool_activity(&frankclaw_core::types::SessionKey::from_raw(session), limit)
+                .await?;
+
+            if activity.is_empty() {
+                println!("No tool activity found.");
+            } else {
+                for entry in activity {
+                    println!(
+                        "[{}] {}  {}{}",
+                        entry.seq,
+                        entry.timestamp.to_rfc3339(),
+                        entry.tool_name,
+                        entry
+                            .tool_call_id
+                            .as_deref()
+                            .map(|value| format!(" ({value})"))
+                            .unwrap_or_default()
+                    );
+                    println!("  {}", entry.output_preview);
+                }
+            }
         }
 
         Command::SkillsList { agent } => {
@@ -857,6 +929,31 @@ fn collect_browser_tool_warnings(
     }
 
     warnings
+}
+
+fn browser_runtime_status(
+    config: &frankclaw_core::config::FrankClawConfig,
+    browser_endpoint: Option<&str>,
+) -> Option<String> {
+    let warnings = collect_browser_tool_warnings(config, browser_endpoint);
+    if warnings.is_empty() {
+        if config
+            .agents
+            .agents
+            .values()
+            .flat_map(|agent| agent.tools.iter())
+            .any(|tool| tool.starts_with("browser."))
+        {
+            Some(format!(
+                "enabled at {}",
+                browser_endpoint.unwrap_or("http://127.0.0.1:9222/")
+            ))
+        } else {
+            None
+        }
+    } else {
+        Some(warnings.join(" | "))
+    }
 }
 
 fn read_password() -> anyhow::Result<secrecy::SecretString> {
