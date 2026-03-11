@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 mod failover;
 mod openai;
 mod openai_compat;

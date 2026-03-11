@@ -60,15 +60,11 @@ extensibility, and multimodal capabilities — not the transport/plumbing layer.
 
 These are the core "brain" features that make OpenClaw's agent loop sophisticated:
 
-- [ ] **Context Engine** — Pluggable context management system
-  OpenClaw has a full registry pattern for context engines with assemble (build model context),
-  compact (reduce context window), ingest (add messages), and bootstrap operations. FrankClaw
-  has none of this — it passes raw session history to the model with no context management.
+- [x] **Context Engine** — Sliding window compaction with token estimation, message pruning,
+  tool pairing repair, and summary marker insertion. (`frankclaw-runtime/src/context.rs`)
 
-- [ ] **Context Compaction** — Automatic context window management
-  OpenClaw auto-compacts conversation history when approaching token limits with identifier
-  preservation, token sanitization, retry logic, and tool result summarization. FrankClaw
-  has no compaction and will hit context window limits on long conversations.
+- [x] **Context Compaction** — Automatic context window management with safety margins,
+  per-message overhead estimation, and orphaned tool result cleanup.
 
 - [ ] **Subagent System** — Hierarchical agent spawning
   OpenClaw supports spawning subagents with depth limits, lifecycle management (spawn, steer,
@@ -80,10 +76,8 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   inbound debounce, group activation, thinking mode management, model directives, and block
   streaming. FrankClaw has a simpler direct-to-model flow.
 
-- [ ] **System Prompt Construction** — Dynamic system prompt assembly
-  OpenClaw builds system prompts dynamically from agent identity, workspace context, bootstrap
-  files, project settings, tool descriptions, and context engine additions. FrankClaw uses
-  static system prompts from config.
+- [x] **System Prompt Construction** — Dynamic system prompt assembly from identity, user prompt,
+  tool listing, skills, safety rules, and runtime metadata. (`frankclaw-runtime/src/lib.rs`)
 
 ### Multimodal & Content Understanding
 
@@ -93,9 +87,8 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   of capabilities, attachment normalization/caching. FrankClaw passes media placeholders but
   has no content understanding.
 
-- [ ] **Link Understanding** — URL content extraction
-  OpenClaw extracts URLs from messages, fetches their content (with SSRF protection), and
-  formats it as context for the model. FrankClaw does not process URLs in messages.
+- [x] **Link Understanding** — SSRF-safe URL extraction from messages with deduplication,
+  markdown link stripping, and private IP/hostname blocking. (`frankclaw-core/src/links.rs`)
 
 - [ ] **TTS (Text-to-Speech)** — Voice output
   OpenClaw supports multiple TTS providers: OpenAI TTS, ElevenLabs, Edge TTS (Microsoft),
@@ -134,11 +127,9 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   background jobs, abort handling, script preflight, send-keys. FrankClaw has browser
   tools but no shell execution tools.
 
-- [ ] **Model Catalog & Discovery** — Provider auto-discovery
-  OpenClaw has extensive model management: auto-discovery across providers (Ollama, Bedrock,
-  HuggingFace, Venice, etc.), compatibility layers, forward compatibility, tool support
-  detection, provider capabilities, synthetic models. FrankClaw has a static provider list
-  with manual failover chain.
+- [x] **Model Catalog & Discovery** — Static catalog with known metadata (context windows, costs,
+  capabilities) for OpenAI and Anthropic models. Enrichment fallback for unknown models with
+  conservative API-specific defaults. (`frankclaw-models/src/catalog.rs`)
 
 - [ ] **Auth Profile Rotation** — Multi-profile provider auth
   OpenClaw supports multiple auth profiles per provider with cooldown auto-expiry, round-robin
@@ -258,16 +249,16 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 ### Tier 1 — Core Intelligence (high impact, needed for competitive parity)
 
-1. Context engine with compaction (conversations break on long sessions without this)
+1. ~~Context engine with compaction~~ ✅
 2. Media understanding pipeline (vision/audio — table-stakes for modern AI assistants)
-3. System prompt construction (dynamic prompts are essential for agent quality)
-4. Link understanding (low effort, high value for conversational context)
+3. ~~System prompt construction~~ ✅
+4. ~~Link understanding~~ ✅
 
 ### Tier 2 — Advanced Agent Capabilities
 
 5. Subagent system (enables complex multi-step workflows)
 6. Auto-reply command system (richer interaction model)
-7. Model catalog/discovery (broader provider support)
+7. ~~Model catalog/discovery~~ ✅
 8. Auth profile rotation (production reliability)
 
 ### Tier 3 — Extensibility
