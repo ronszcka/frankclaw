@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod bash;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,6 +83,7 @@ impl ToolRegistry {
         registry.register(Arc::new(BrowserPressTool::new(browser.clone())));
         registry.register(Arc::new(BrowserSessionsTool::new(browser.clone())));
         registry.register(Arc::new(BrowserCloseTool::new(browser)));
+        registry.register(Arc::new(bash::BashTool::from_env()));
         registry
     }
 

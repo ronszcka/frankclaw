@@ -117,10 +117,9 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
   tool policy enforcement, per-agent sandbox config, workspace-only mode. FrankClaw has
   no sandboxing.
 
-- [ ] **Bash Tools** — Shell command execution
-  OpenClaw has bash tool execution with PTY support, process registry, approval requests,
-  background jobs, abort handling, script preflight, send-keys. FrankClaw has browser
-  tools but no shell execution tools.
+- [x] **Bash Tools** — Shell command execution with timeout enforcement, output truncation,
+  working directory support, and configurable security policy (deny-all, allow-all, or
+  binary allowlist). (`frankclaw-tools/src/bash.rs`)
 
 - [x] **Model Catalog & Discovery** — Static catalog with known metadata (context windows, costs,
   capabilities) for OpenAI and Anthropic models. Enrichment fallback for unknown models with
@@ -261,7 +260,7 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 9. ~~Hooks system~~ ✅
 10. ~~Skills system~~ ✅ (already implemented in plugin-sdk)
 11. ACP protocol (standard interop)
-12. Bash tools with sandboxing (powerful but needs security care)
+12. ~~Bash tools with sandboxing~~ ✅
 
 ### Tier 4 — Nice-to-Have
 
