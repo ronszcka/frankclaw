@@ -323,7 +323,7 @@ FrankClaw is designed with defense-in-depth. Every layer enforces its own securi
 | **Network binding** | Gateway **refuses to start** if bound to a non-loopback address without authentication configured. This is a hard error, not a warning. |
 | **SSRF protection** | All outbound HTTP requests resolve DNS first and block connections to private IPs (RFC 1918), loopback, link-local, CGNAT (100.64.0.0/10), documentation ranges, benchmarking ranges, and IPv4-mapped IPv6 private addresses. |
 | **Media files** | Filenames sanitized (path traversal stripped, leading dots removed). MIME types mapped to safe extensions only (never `.exe`, `.sh`, `.bat`). |
-| **Config hot-reload** | Lock-free `ArcSwap` pointer swap. No race conditions between in-flight requests and config updates. |
+| **Config hot-reload** | File watcher plus lock-free `ArcSwap` swap for the reloadable gateway subset. Restart-sensitive config changes are detected and flagged instead of being silently applied. |
 | **Rate limiting** | Per-IP auth failure tracking with sliding window and lockout. Cleared on successful auth. |
 | **Dependencies** | No OpenSSL (uses `rustls` only). Release builds use LTO, stripped symbols, and `panic = abort`. |
 
@@ -528,7 +528,6 @@ See [PARITY_TODO.md](PARITY_TODO.md) for the current parity tracker.
 - [ ] Streaming SSE response handling for model providers
 - [ ] Agent runtime with sandbox (Bubblewrap/Docker/Podman)
 - [ ] LanceDB vector memory backend
-- [ ] Config file watcher for hot-reload
 - [ ] Companion nodes and apps
 - [ ] Voice
 
