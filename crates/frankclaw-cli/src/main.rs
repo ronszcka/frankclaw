@@ -72,6 +72,16 @@ enum Command {
     /// Show runtime and exposure status for the configured gateway.
     Status,
 
+    /// Start the gateway as a background daemon.
+    Start {
+        /// Override the listen port.
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
+
+    /// Stop a running gateway daemon.
+    Stop,
+
     /// Generate a secure starter config for a chosen channel profile.
     Onboard {
         /// Starter channel profile: web, telegram, whatsapp, slack, discord, signal.
@@ -413,6 +423,84 @@ async fn main() -> anyhow::Result<()> {
             println!("Channels:");
             for (channel_id, channel) in channels.channels() {
                 println!("  {}  {:?}", channel_id, channel.health().await);
+            }
+
+            // Check daemon PID status
+            let pid_path = state_dir.join("frankclaw.pid");
+            if let Some(status) = daemon_pid_status(&pid_path) {
+                println!();
+                println!("Daemon:");
+                println!("  {status}");
+            }
+        }
+
+        Command::Start { port } => {
+            let pid_path = state_dir.join("frankclaw.pid");
+            if let Some(existing_pid) = read_pid_file(&pid_path) {
+                if is_process_alive(existing_pid) {
+                    println!("Gateway is already running (PID {existing_pid}).");
+                    return Ok(());
+                }
+                // Stale PID file — clean up
+                let _ = std::fs::remove_file(&pid_path);
+            }
+
+            let executable = std::env::current_exe().context("failed to locate frankclaw binary")?;
+            let mut cmd = std::process::Command::new(&executable);
+            cmd.arg("gateway");
+            if let Some(config_path) = &cli.config {
+                cmd.arg("--config").arg(config_path);
+            }
+            cmd.arg("--state-dir").arg(&state_dir);
+            if let Some(port) = port {
+                cmd.arg("--port").arg(port.to_string());
+            }
+
+            // Redirect stdout/stderr to log file
+            let log_path = state_dir.join("gateway.log");
+            std::fs::create_dir_all(&state_dir)?;
+            let log_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .context("failed to open log file")?;
+            let log_err = log_file
+                .try_clone()
+                .context("failed to clone log file handle")?;
+
+            cmd.stdout(std::process::Stdio::from(log_file));
+            cmd.stderr(std::process::Stdio::from(log_err));
+            cmd.stdin(std::process::Stdio::null());
+
+            let child = cmd.spawn().context("failed to start gateway process")?;
+            let pid = child.id();
+
+            std::fs::write(&pid_path, pid.to_string())?;
+            restrict_file_permissions(&pid_path);
+
+            println!("Gateway started (PID {pid}).");
+            println!("  Log: {}", log_path.display());
+            println!("  PID file: {}", pid_path.display());
+            println!();
+            println!("Stop with: frankclaw stop");
+        }
+
+        Command::Stop => {
+            let pid_path = state_dir.join("frankclaw.pid");
+            match read_pid_file(&pid_path) {
+                Some(pid) => {
+                    if !is_process_alive(pid) {
+                        println!("Gateway is not running (stale PID {pid}).");
+                        let _ = std::fs::remove_file(&pid_path);
+                        return Ok(());
+                    }
+                    stop_process(pid)?;
+                    let _ = std::fs::remove_file(&pid_path);
+                    println!("Gateway stopped (PID {pid}).");
+                }
+                None => {
+                    println!("No running gateway found (no PID file).");
+                }
             }
         }
 
@@ -1348,6 +1436,63 @@ fn restrict_file_permissions(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
         let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon process management
+// ---------------------------------------------------------------------------
+
+fn read_pid_file(pid_path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|content| content.trim().parse::<u32>().ok())
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    // Use `kill -0` to check process existence without unsafe code
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn stop_process(pid: u32) -> anyhow::Result<()> {
+    let status = std::process::Command::new("kill")
+        .args([&pid.to_string()])
+        .status()
+        .context("failed to run kill")?;
+    if !status.success() {
+        anyhow::bail!("failed to send SIGTERM to PID {pid}");
+    }
+
+    // Wait briefly for the process to exit
+    for _ in 0..20 {
+        if !is_process_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Force kill if still alive
+    if is_process_alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+fn daemon_pid_status(pid_path: &std::path::Path) -> Option<String> {
+    let pid = read_pid_file(pid_path)?;
+    if is_process_alive(pid) {
+        Some(format!("running (PID {pid})"))
+    } else {
+        Some(format!("not running (stale PID file, PID {pid})"))
     }
 }
 
@@ -2556,6 +2701,110 @@ mod tests {
         };
         assert_eq!(config.api, "anthropic");
         assert!(config.api_key_ref.is_some());
+    }
+
+    // --- Process management tests ---
+
+    #[test]
+    fn read_pid_file_returns_none_for_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "frankclaw-pid-test-missing-{}.pid",
+            std::process::id()
+        ));
+        assert!(read_pid_file(&path).is_none());
+    }
+
+    #[test]
+    fn read_pid_file_returns_pid_for_valid_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-pid-test-valid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+        let pid_path = dir.join("frankclaw.pid");
+        std::fs::write(&pid_path, "12345\n").expect("should write pid");
+
+        assert_eq!(read_pid_file(&pid_path), Some(12345));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_pid_file_returns_none_for_invalid_content() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-pid-test-invalid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+        let pid_path = dir.join("frankclaw.pid");
+        std::fs::write(&pid_path, "not-a-pid").expect("should write");
+
+        assert_eq!(read_pid_file(&pid_path), None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_process_alive_returns_true_for_current_process() {
+        let pid = std::process::id();
+        assert!(is_process_alive(pid));
+    }
+
+    #[test]
+    fn is_process_alive_returns_false_for_nonexistent_process() {
+        // PID 99999999 is unlikely to exist
+        assert!(!is_process_alive(99_999_999));
+    }
+
+    #[test]
+    fn daemon_pid_status_shows_running_for_current_pid() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-pid-status-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+        let pid_path = dir.join("frankclaw.pid");
+        std::fs::write(&pid_path, std::process::id().to_string())
+            .expect("should write pid");
+
+        let status = daemon_pid_status(&pid_path);
+        assert!(status.is_some());
+        assert!(status.unwrap().contains("running"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn daemon_pid_status_shows_stale_for_dead_pid() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-pid-stale-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+        let pid_path = dir.join("frankclaw.pid");
+        std::fs::write(&pid_path, "99999999").expect("should write pid");
+
+        let status = daemon_pid_status(&pid_path);
+        assert!(status.is_some());
+        assert!(status.unwrap().contains("stale"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

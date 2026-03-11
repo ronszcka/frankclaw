@@ -146,20 +146,18 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 ### Operator Experience
 
-- [ ] **Full Daemon Management** — Cross-platform service management
-  OpenClaw has systemd unit generation, launchd plist generation, Windows schtasks,
-  service audit, runtime binary discovery, service environment management. FrankClaw
-  has basic systemd unit output.
+- [x] **Daemon Management** — `frankclaw start/stop/status` with PID file tracking, log
+  redirection, graceful SIGTERM shutdown with SIGKILL fallback. Also retains systemd unit
+  generation for production deployments.
 
-- [ ] **Interactive Wizard/Onboarding** — Guided setup
-  OpenClaw has an interactive wizard with Clack prompts for gateway config, secret input,
-  completion flows, channel setup. FrankClaw has CLI config commands but no interactive
-  wizard.
+- [x] **Interactive Setup Wizard** — `frankclaw setup` with guided provider selection
+  (OpenAI/Anthropic/Ollama), API key env var configuration, channel selection (6 channels),
+  port choice, session encryption toggle, and automatic gateway token generation.
 
-- [ ] **Doctor Diagnostics** — Deep health checks
-  OpenClaw's `doctor` command covers config analysis, legacy migration, memory search,
-  session locks, state integrity, workspace status, bootstrap size, daemon flows, security
-  checks. FrankClaw has basic `health` checks.
+- [x] **Doctor Diagnostics** — comprehensive `frankclaw doctor` covering system info, config
+  validation, state directory health, SQLite DB integrity, port availability, async provider
+  connectivity checks, Unix file/directory permission audits, channel status, and security
+  posture with structured PASS/WARN/FAIL/INFO output.
 
 ### Rich Channel Behavior (Previously Checked — Done)
 
@@ -249,14 +247,15 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 11. ~~ACP protocol~~ — **SKIPPED**: niche interop standard with no real-world adoption yet
 12. ~~Bash tools with sandboxing~~ ✅
 
-### Tier 4 — Operator Experience (worth doing)
+### Tier 4 — Operator Experience
 
-13. Doctor diagnostics — `frankclaw doctor` checks config validity, provider connectivity,
-    DB health, port availability. High UX value for self-hosters.
-14. Interactive setup wizard — guided first-run config (pick provider, enter API key,
-    choose port). Removes the #1 barrier to adoption (hand-editing JSON).
-15. Process management — `frankclaw start/stop/status` for proper daemonization.
-    Makes it usable as a long-running service.
+13. ~~Doctor diagnostics~~ ✅ — comprehensive `frankclaw doctor` with system info, config
+    validation, state dir health, SQLite integrity, port availability, provider connectivity,
+    file permission audits, channel status, and security posture.
+14. ~~Interactive setup wizard~~ ✅ — `frankclaw setup` guides through provider selection
+    (OpenAI/Anthropic/Ollama), API key config, channel selection, port, encryption.
+15. ~~Process management~~ ✅ — `frankclaw start/stop` with PID file tracking, log redirection,
+    graceful shutdown (SIGTERM → SIGKILL fallback), stale PID detection.
 
 ### Tier 4 — Skipped (low value or excessive effort)
 
