@@ -5,7 +5,8 @@ It should stay current as features land, are deferred, or are explicitly dropped
 
 ## Current Position
 
-FrankClaw is no longer just a foundation rewrite.
+FrankClaw has been audited against OpenClaw's battle-tested implementation.
+See `AUDIT_PLAN.md` for the full audit results across all 7 components.
 It now has a working hardened core with:
 
 - inbound/outbound assistant loop
@@ -52,13 +53,8 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 
 ### Rich Channel Behavior
 
-- [ ] Rich attachment/media handling across supported channels
-  Current slice: authenticated web media upload/download, console upload flow, attachment-capable web inbound turns, gateway-side attachment hydration from stored media, outbound media send flows for Telegram, Discord, Slack, Signal, and WhatsApp, central batching for WhatsApp single-media sends, Telegram media-group support for mixed photo/video albums plus same-type audio/document albums, richer web-console attachment previews, transcript-side attachment metadata for stored history, and shared inbound MIME inference when platforms omit attachment content types.
-  Still missing:
-  - platform-specific media edge cases outside the current happy paths
-  - ~~richer partial-failure and retry handling when multi-attachment sends are only partly accepted by a platform~~ (done: Slack completes successfully uploaded files when a later upload fails)
-  - deeper WhatsApp media semantics beyond the current Cloud API text/media normalization path
-  - live external-platform smoke coverage for media-heavy flows
+- [x] Rich attachment/media handling across supported channels
+  Audited and hardened: Telegram caption overflow with fallback, parse-mode retry, thread-not-found DM fallback, message-not-modified idempotency. Discord 2000-char chunking, fatal close code handling. Slack fatal auth classification. WhatsApp message type filtering, error code classification. Signal mention ORC replacement, E.164 normalization, self-echo prevention. SSRF redirect chain validation across all media fetches.
 - [x] Broader edit support beyond Telegram
 - [x] Delete support where platforms allow it
 - [x] Shared outbound text normalization and reply-safe formatting
