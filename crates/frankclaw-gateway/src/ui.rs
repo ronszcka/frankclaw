@@ -372,6 +372,8 @@ pub async fn index() -> Html<&'static str> {
                   <option value="note">Note</option>
                   <option value="code">Code</option>
                   <option value="checklist">Checklist</option>
+                  <option value="status">Status</option>
+                  <option value="metric">Metric</option>
                 </select>
               </label>
               <label>Block text
@@ -684,10 +686,7 @@ pub async fn index() -> Html<&'static str> {
       const blockItems = document.createElement("div");
       blockItems.className = "grid";
       for (const block of (canvas.blocks || [])) {
-        const item = document.createElement("div");
-        item.className = "bubble";
-        item.innerHTML = `<small>${block.kind || "block"}</small><div></div>`;
-        item.querySelector("div").textContent = block.text || "";
+        const item = renderCanvasBlock(block);
         blockItems.appendChild(item);
       }
 
@@ -696,6 +695,33 @@ pub async fn index() -> Html<&'static str> {
       if ((canvas.blocks || []).length) {
         els.canvasStage.append(blockItems);
       }
+    }
+
+    function renderCanvasBlock(block) {
+      const item = document.createElement("div");
+      item.className = "bubble";
+      item.innerHTML = `<small></small><div></div>`;
+      const label = item.querySelector("small");
+      const content = item.querySelector("div");
+      const kind = block.kind || "block";
+      const meta = block.meta || {};
+
+      if (kind === "status") {
+        label.textContent = `status · ${meta.level || "info"}`;
+        content.textContent = block.text || "";
+        return item;
+      }
+
+      if (kind === "metric") {
+        label.textContent = "metric";
+        const value = meta.value == null ? "" : String(meta.value);
+        content.textContent = value && block.text ? `${block.text}: ${value}` : (value || block.text || "");
+        return item;
+      }
+
+      label.textContent = kind;
+      content.textContent = block.text || "";
+      return item;
     }
 
     function handleMessage(event) {
@@ -846,12 +872,16 @@ pub async fn index() -> Html<&'static str> {
 
     els.canvasAppendBtn.addEventListener("click", async () => {
       if (!els.canvasBlockText.value.trim()) return;
+      const block = {
+        kind: els.canvasBlockKind.value,
+        text: els.canvasBlockText.value.trim(),
+      };
+      if (els.canvasBlockKind.value === "status") {
+        block.meta = { level: "info" };
+      }
       const response = await rpc("canvas_patch", {
         ...canvasParams(),
-        append_blocks: [{
-          kind: els.canvasBlockKind.value,
-          text: els.canvasBlockText.value.trim(),
-        }],
+        append_blocks: [block],
       });
       els.canvasBlockText.value = "";
       renderCanvas(response.canvas || null);

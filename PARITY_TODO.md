@@ -69,7 +69,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Session-linked Canvas workflows
 - [x] Incremental Canvas patches instead of full-document replace
 - [x] Multiple canvases or per-session canvases
-- [ ] Safer agent-driven UI blocks/components
+- [x] Safer agent-driven UI blocks/components
 - [x] Snapshot/export flows
 - [ ] A2UI-style richer host capabilities
 
@@ -101,6 +101,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] More failure-path tests for provider failover and retries
 - [x] Coverage for Canvas RPC/UI behavior
 - [x] Unit and gateway coverage for Canvas export snapshots
+- [x] Unit coverage for bounded Canvas component blocks
 - [x] Coverage for onboarding/install helpers
 - [ ] Regression-focused tests for delivery metadata and session rewrites
 

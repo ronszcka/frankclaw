@@ -9,12 +9,16 @@ pub enum CanvasBlockKind {
     Code,
     Note,
     Checklist,
+    Status,
+    Metric,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CanvasBlock {
     pub kind: CanvasBlockKind,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -209,6 +213,33 @@ fn render_markdown_block(block: &CanvasBlock) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        CanvasBlockKind::Status => {
+            let level = block
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("level"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("info");
+            format!("**Status ({level})**\n{text}")
+        }
+        CanvasBlockKind::Metric => {
+            let value = block
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("value"))
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string())
+                })
+                .unwrap_or_else(|| text.to_string());
+            if text.is_empty() || text == value {
+                format!("**Metric:** {value}")
+            } else {
+                format!("**Metric:** {text} = {value}")
+            }
+        }
     }
 }
 
@@ -227,10 +258,12 @@ mod tests {
                 CanvasBlock {
                     kind: CanvasBlockKind::Note,
                     text: "deploy window open".into(),
+                    meta: None,
                 },
                 CanvasBlock {
                     kind: CanvasBlockKind::Checklist,
                     text: "verify smoke tests\nnotify team".into(),
+                    meta: None,
                 },
             ],
             revision: 3,
@@ -242,5 +275,33 @@ mod tests {
         assert!(export.contains("Session: default:web:control"));
         assert!(export.contains("> deploy window open"));
         assert!(export.contains("- [ ] verify smoke tests"));
+    }
+
+    #[test]
+    fn export_document_renders_structured_component_blocks() {
+        let document = CanvasDocument {
+            id: "status".into(),
+            title: String::new(),
+            body: String::new(),
+            session_key: None,
+            blocks: vec![
+                CanvasBlock {
+                    kind: CanvasBlockKind::Status,
+                    text: "Gateway healthy".into(),
+                    meta: Some(serde_json::json!({ "level": "ok" })),
+                },
+                CanvasBlock {
+                    kind: CanvasBlockKind::Metric,
+                    text: "Open sessions".into(),
+                    meta: Some(serde_json::json!({ "value": 12 })),
+                },
+            ],
+            revision: 1,
+            updated_at: chrono::DateTime::from_timestamp(1_710_000_123, 0).unwrap(),
+        };
+
+        let export = export_document(&document, CanvasExportFormat::Markdown);
+        assert!(export.contains("**Status (ok)**"));
+        assert!(export.contains("**Metric:** Open sessions = 12"));
     }
 }
