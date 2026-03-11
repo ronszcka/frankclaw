@@ -81,11 +81,10 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 ### Multimodal & Content Understanding
 
-- [ ] **Media Understanding** — Vision, audio transcription, video analysis
-  OpenClaw has a full multimodal pipeline: vision analysis (image understanding via model),
-  audio transcription (Deepgram, OpenAI Whisper), video analysis, provider registry, auto-detection
-  of capabilities, attachment normalization/caching. FrankClaw passes media placeholders but
-  has no content understanding.
+- [x] **Media Understanding** — Vision description via OpenAI-compatible vision API, audio
+  transcription via Whisper API, media kind classification, attachment processing pipeline
+  with size limits and graceful error handling. (`frankclaw-media/src/understanding.rs`,
+  `frankclaw-core/src/media.rs`)
 
 - [x] **Link Understanding** — SSRF-safe URL extraction from messages with deduplication,
   markdown link stripping, and private IP/hostname blocking. (`frankclaw-core/src/links.rs`)
@@ -250,7 +249,7 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 ### Tier 1 — Core Intelligence (high impact, needed for competitive parity)
 
 1. ~~Context engine with compaction~~ ✅
-2. Media understanding pipeline (vision/audio — table-stakes for modern AI assistants)
+2. ~~Media understanding pipeline~~ ✅
 3. ~~System prompt construction~~ ✅
 4. ~~Link understanding~~ ✅
 

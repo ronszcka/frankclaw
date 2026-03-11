@@ -4,6 +4,60 @@ use std::path::PathBuf;
 
 use crate::types::MediaId;
 
+/// Classification of media content by broad kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Image,
+    Audio,
+    Video,
+    Document,
+    Unknown,
+}
+
+/// Classify a MIME type into a media kind.
+pub fn classify_mime(mime: &str) -> MediaKind {
+    let normalized = normalize_mime(mime);
+    if normalized.starts_with("image/") {
+        MediaKind::Image
+    } else if normalized.starts_with("audio/") {
+        MediaKind::Audio
+    } else if normalized.starts_with("video/") {
+        MediaKind::Video
+    } else if matches!(
+        normalized,
+        "application/pdf"
+            | "application/json"
+            | "application/zip"
+            | "text/plain"
+            | "text/csv"
+            | "text/markdown"
+            | "text/html"
+    ) {
+        MediaKind::Document
+    } else {
+        MediaKind::Unknown
+    }
+}
+
+/// Classify a file by its extension when MIME is unavailable.
+pub fn classify_extension(filename: &str) -> MediaKind {
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "tiff" => MediaKind::Image,
+        "mp3" | "m4a" | "ogg" | "wav" | "flac" | "weba" | "oga" | "aac" | "opus" => {
+            MediaKind::Audio
+        }
+        "mp4" | "webm" | "mov" | "avi" | "mkv" => MediaKind::Video,
+        "pdf" | "json" | "txt" | "csv" | "md" | "html" | "xml" | "zip" => MediaKind::Document,
+        _ => MediaKind::Unknown,
+    }
+}
+
 /// A stored media file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFile {
@@ -192,5 +246,50 @@ mod tests {
         assert_eq!(infer_mime_from_name("voice-note.m4a"), Some("audio/mp4"));
         assert_eq!(infer_mime_from_name("report.csv"), Some("text/csv"));
         assert_eq!(infer_mime_from_name("unknown.blob"), None);
+    }
+
+    #[test]
+    fn classify_mime_images() {
+        assert_eq!(classify_mime("image/jpeg"), MediaKind::Image);
+        assert_eq!(classify_mime("image/png"), MediaKind::Image);
+        assert_eq!(classify_mime("image/webp; charset=utf-8"), MediaKind::Image);
+    }
+
+    #[test]
+    fn classify_mime_audio() {
+        assert_eq!(classify_mime("audio/mpeg"), MediaKind::Audio);
+        assert_eq!(classify_mime("audio/ogg"), MediaKind::Audio);
+    }
+
+    #[test]
+    fn classify_mime_video() {
+        assert_eq!(classify_mime("video/mp4"), MediaKind::Video);
+    }
+
+    #[test]
+    fn classify_mime_documents() {
+        assert_eq!(classify_mime("application/pdf"), MediaKind::Document);
+        assert_eq!(classify_mime("text/plain"), MediaKind::Document);
+        assert_eq!(classify_mime("text/csv"), MediaKind::Document);
+    }
+
+    #[test]
+    fn classify_mime_unknown() {
+        assert_eq!(classify_mime("application/octet-stream"), MediaKind::Unknown);
+    }
+
+    #[test]
+    fn classify_extension_covers_common_types() {
+        assert_eq!(classify_extension("photo.jpg"), MediaKind::Image);
+        assert_eq!(classify_extension("voice.mp3"), MediaKind::Audio);
+        assert_eq!(classify_extension("clip.mp4"), MediaKind::Video);
+        assert_eq!(classify_extension("report.pdf"), MediaKind::Document);
+        assert_eq!(classify_extension("data.xyz"), MediaKind::Unknown);
+    }
+
+    #[test]
+    fn classify_extension_case_insensitive() {
+        assert_eq!(classify_extension("PHOTO.JPG"), MediaKind::Image);
+        assert_eq!(classify_extension("voice.MP3"), MediaKind::Audio);
     }
 }
