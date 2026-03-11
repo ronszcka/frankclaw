@@ -522,13 +522,15 @@ frankclaw/
 
 ## Roadmap
 
+See [PARITY_TODO.md](PARITY_TODO.md) for the current parity tracker.
+
+- [ ] Long-tail attachment/media edge cases on supported channels
 - [ ] Streaming SSE response handling for model providers
-- [ ] Discord, Slack, Signal channel adapters
 - [ ] Agent runtime with sandbox (Bubblewrap/Docker/Podman)
 - [ ] LanceDB vector memory backend
 - [ ] Config file watcher for hot-reload
-- [ ] Device node pairing (mobile/desktop apps)
-- [ ] Minimal control UI (Tailwind)
+- [ ] Companion nodes and apps
+- [ ] Voice
 
 ## License
 

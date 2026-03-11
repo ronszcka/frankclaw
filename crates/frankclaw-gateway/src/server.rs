@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -36,10 +37,12 @@ use crate::rate_limit::AuthRateLimiter;
 use crate::state::GatewayState;
 
 const SESSION_MAINTENANCE_INTERVAL_SECS: u64 = 15 * 60;
+const CONFIG_WATCH_INTERVAL_SECS: u64 = 2;
 
 /// Build and start the gateway server.
 pub async fn run(
     config: FrankClawConfig,
+    config_path: Option<PathBuf>,
     sessions: Arc<SqliteSessionStore>,
     runtime: Arc<Runtime>,
     pairing: Arc<PairingStore>,
@@ -54,6 +57,7 @@ pub async fn run(
     let channels = Arc::new(frankclaw_channels::load_from_config(&config)?);
     let state = GatewayState::new(config, sessions, runtime, channels, pairing, media);
     log_loaded_skills(&state);
+    start_config_watcher(state.clone(), config_path);
     start_channel_runtime(state.clone());
     start_session_maintenance(state.clone());
     start_cron_runtime(state.clone(), cron).await?;
@@ -1147,6 +1151,128 @@ fn log_loaded_skills(state: &Arc<GatewayState>) {
     }
 }
 
+fn start_config_watcher(state: Arc<GatewayState>, config_path: Option<PathBuf>) {
+    let Some(config_path) = config_path else {
+        return;
+    };
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(CONFIG_WATCH_INTERVAL_SECS));
+        let mut last_stamp = config_file_stamp(&config_path);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+
+            let next_stamp = config_file_stamp(&config_path);
+            if next_stamp == last_stamp {
+                continue;
+            }
+            last_stamp = next_stamp;
+
+            match frankclaw_core::config::FrankClawConfig::load_or_default(&config_path) {
+                Ok(next_config) => {
+                    if let Err(err) = next_config.validate() {
+                        log_failure(
+                            "config.watch",
+                            serde_json::json!({
+                                "path": config_path.display().to_string(),
+                                "reason": err.to_string(),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    let current = state.current_config();
+                    let restart_required = restart_sensitive_config_changed(&current, &next_config);
+                    let merged = merge_reloadable_config(&current, &next_config);
+                    state.reload_config(merged);
+
+                    let event = frankclaw_core::protocol::Frame::Event(
+                        frankclaw_core::protocol::EventFrame {
+                            event: frankclaw_core::protocol::EventType::ConfigChanged,
+                            payload: serde_json::json!({
+                                "path": config_path.display().to_string(),
+                                "restart_required": restart_required,
+                            }),
+                        },
+                    );
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        let _ = state.broadcast.send(json);
+                    }
+                    log_event(
+                        "config.watch",
+                        if restart_required {
+                            "partial_reload"
+                        } else {
+                            "reloaded"
+                        },
+                        serde_json::json!({
+                            "path": config_path.display().to_string(),
+                            "restart_required": restart_required,
+                        }),
+                    );
+                }
+                Err(err) => {
+                    log_failure(
+                        "config.watch",
+                        serde_json::json!({
+                            "path": config_path.display().to_string(),
+                            "reason": err.to_string(),
+                        }),
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn config_file_stamp(path: &FsPath) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    Some((metadata.len(), modified))
+}
+
+fn restart_sensitive_config_changed(
+    current: &FrankClawConfig,
+    next: &FrankClawConfig,
+) -> bool {
+    config_restart_fingerprint(current) != config_restart_fingerprint(next)
+}
+
+fn config_restart_fingerprint(config: &FrankClawConfig) -> serde_json::Value {
+    serde_json::json!({
+        "agents": config.agents,
+        "channels": config.channels,
+        "models": config.models,
+        "media": config.media,
+        "security": config.security,
+        "session_scoping": config.session.scoping,
+        "session_reset": config.session.reset,
+    })
+}
+
+fn merge_reloadable_config(
+    current: &FrankClawConfig,
+    next: &FrankClawConfig,
+) -> FrankClawConfig {
+    let mut merged = current.clone();
+    merged.gateway = next.gateway.clone();
+    merged.hooks = next.hooks.clone();
+    merged.logging = next.logging.clone();
+    merged.session.pruning = next.session.pruning.clone();
+
+    for (channel_id, current_channel) in &mut merged.channels {
+        if let Some(next_channel) = next.channels.get(channel_id) {
+            current_channel.extra = next_channel.extra.clone();
+        }
+    }
+
+    merged
+}
+
 async fn persist_delivery_metadata(
     sessions: &SqliteSessionStore,
     session_key: &frankclaw_core::types::SessionKey,
@@ -1392,6 +1518,67 @@ mod tests {
     use frankclaw_media::MediaStore;
     use secrecy::{ExposeSecret, SecretString};
     use tower::ServiceExt;
+
+    #[test]
+    fn merge_reloadable_config_updates_gateway_and_preserves_models() {
+        let mut current = FrankClawConfig::default();
+        current.gateway.port = 18789;
+        current.models.providers = vec![ProviderConfig {
+            id: "openai".into(),
+            api: "openai".into(),
+            base_url: Some("https://api.openai.com/v1".into()),
+            api_key_ref: Some("OPENAI_API_KEY".into()),
+            models: vec!["gpt-4o-mini".into()],
+            cooldown_secs: 30,
+        }];
+        current.channels.insert(
+            frankclaw_core::types::ChannelId::new("web"),
+            ChannelConfig {
+                enabled: true,
+                accounts: Vec::new(),
+                extra: serde_json::json!({ "dm_policy": "pairing" }),
+            },
+        );
+
+        let mut next = current.clone();
+        next.gateway.port = 19999;
+        next.models.providers[0].models = vec!["gpt-4.1".into()];
+        next.channels.insert(
+            frankclaw_core::types::ChannelId::new("web"),
+            ChannelConfig {
+                enabled: true,
+                accounts: Vec::new(),
+                extra: serde_json::json!({ "dm_policy": "open" }),
+            },
+        );
+
+        let merged = merge_reloadable_config(&current, &next);
+
+        assert_eq!(merged.gateway.port, 19999);
+        assert_eq!(merged.models.providers[0].models, vec!["gpt-4o-mini"]);
+        assert_eq!(
+            merged.channels[&frankclaw_core::types::ChannelId::new("web")].extra["dm_policy"],
+            serde_json::json!("open")
+        );
+    }
+
+    #[test]
+    fn restart_sensitive_config_changed_detects_provider_changes() {
+        let mut current = FrankClawConfig::default();
+        current.models.providers = vec![ProviderConfig {
+            id: "openai".into(),
+            api: "openai".into(),
+            base_url: Some("https://api.openai.com/v1".into()),
+            api_key_ref: Some("OPENAI_API_KEY".into()),
+            models: vec!["gpt-4o-mini".into()],
+            cooldown_secs: 30,
+        }];
+
+        let mut next = current.clone();
+        next.models.providers[0].models = vec!["gpt-4.1".into()];
+
+        assert!(restart_sensitive_config_changed(&current, &next));
+    }
 
     #[test]
     fn group_allowlist_matches_explicit_thread_or_wildcard() {

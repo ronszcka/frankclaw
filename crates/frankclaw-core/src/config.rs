@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 
 use crate::auth::{AuthMode, RateLimitConfig};
@@ -41,6 +42,22 @@ impl Default for FrankClawConfig {
 }
 
 impl FrankClawConfig {
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path).map_err(|err| FrankClawError::ConfigIo {
+            msg: format!("failed to read config '{}': {err}", path.display()),
+        })?;
+        serde_json::from_str(&content).map_err(|err| FrankClawError::ConfigIo {
+            msg: format!("failed to parse config '{}': {err}", path.display()),
+        })
+    }
+
+    pub fn load_or_default(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        Self::load_from_path(path)
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.gateway.auth.validate()?;
 
@@ -992,5 +1009,40 @@ mod tests {
         let mut config = FrankClawConfig::default();
         config.gateway.bind = BindMode::Address("not-an-ip".into());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn load_or_default_returns_default_when_file_is_missing() {
+        let path = std::env::temp_dir().join(format!(
+            "frankclaw-missing-config-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+
+        let loaded = FrankClawConfig::load_or_default(&path).expect("missing config should default");
+
+        assert_eq!(loaded.gateway.port, FrankClawConfig::default().gateway.port);
+    }
+
+    #[test]
+    fn load_from_path_reads_json_config() {
+        let path = std::env::temp_dir().join(format!(
+            "frankclaw-config-load-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "gateway": {
+                    "port": 19999
+                }
+            })
+            .to_string(),
+        )
+        .expect("config should write");
+
+        let loaded = FrankClawConfig::load_from_path(&path).expect("config should load");
+
+        assert_eq!(loaded.gateway.port, 19999);
+        let _ = std::fs::remove_file(path);
     }
 }

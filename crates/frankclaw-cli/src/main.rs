@@ -256,7 +256,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Gateway { port } => {
-            let config = load_config(cli.config.as_deref(), &state_dir)?;
+            let config_path = cli
+                .config
+                .clone()
+                .unwrap_or_else(|| state_dir.join("frankclaw.json"));
+            let config = load_config(Some(&config_path), &state_dir)?;
             let mut config = config;
             if let Some(port) = port {
                 config.gateway.port = port;
@@ -289,7 +293,16 @@ async fn main() -> anyhow::Result<()> {
                 "starting frankclaw gateway"
             );
 
-            frankclaw_gateway::server::run(config, sessions, runtime, pairing, cron, media).await?;
+            frankclaw_gateway::server::run(
+                config,
+                Some(config_path),
+                sessions,
+                runtime,
+                pairing,
+                cron,
+                media,
+            )
+            .await?;
         }
 
         Command::GenToken => {
@@ -826,17 +839,11 @@ fn load_config(
 
     if !config_path.exists() {
         info!("no config found at {}, using defaults", config_path.display());
-        return Ok(frankclaw_core::config::FrankClawConfig::default());
+        return frankclaw_core::config::FrankClawConfig::load_or_default(&config_path)
+            .map_err(anyhow::Error::from);
     }
-
-    let content = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read config: {}", config_path.display()))?;
-
-    let config: frankclaw_core::config::FrankClawConfig =
-        serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse config: {}", config_path.display()))?;
-
-    Ok(config)
+    frankclaw_core::config::FrankClawConfig::load_from_path(&config_path)
+        .map_err(anyhow::Error::from)
 }
 
 fn collect_doctor_warnings(
