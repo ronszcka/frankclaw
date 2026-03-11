@@ -507,6 +507,16 @@ fn build_edit_request(target: &EditMessageTarget, new_text: &str) -> (String, se
 mod tests {
     use super::*;
 
+    fn fixture(name: &str) -> serde_json::Value {
+        match name {
+            "message_create_with_attachment" => serde_json::from_str(include_str!(
+                "fixture_discord_message_create_with_attachment.json"
+            ))
+            .expect("fixture should parse"),
+            _ => panic!("unknown fixture: {name}"),
+        }
+    }
+
     #[test]
     fn parse_message_create_detects_group_mentions() {
         let inbound = parse_message_create(
@@ -660,5 +670,20 @@ mod tests {
         assert_eq!(inbound.attachments[0].filename.as_deref(), Some("image.png"));
         assert_eq!(inbound.attachments[0].mime_type, "image/png");
         assert_eq!(inbound.attachments[0].size_bytes, Some(1234));
+    }
+
+    #[test]
+    fn parse_message_create_matches_contract_fixture_shape() {
+        let inbound = parse_message_create(&fixture("message_create_with_attachment"), Some("999"))
+            .expect("fixture should parse");
+
+        assert_eq!(inbound.channel.as_str(), "discord");
+        assert_eq!(inbound.sender_id, "user-1");
+        assert_eq!(inbound.text.as_deref(), Some("image upload"));
+        assert_eq!(inbound.attachments.len(), 1);
+        assert_eq!(
+            inbound.attachments[0].url.as_deref(),
+            Some("https://cdn.discordapp.com/attachments/att-1/photo.png")
+        );
     }
 }

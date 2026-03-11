@@ -98,6 +98,7 @@ The main remaining gap is feature surface, not the core message-to-model flow.
 - [x] Gateway-path coverage for authenticated web media upload/inbound flows
 - [x] Better end-to-end coverage for operator flows
 - [ ] External-API contract fixtures for supported channels
+  Current slice: Slack, Discord, and WhatsApp inbound contract fixtures
 - [x] More failure-path tests for provider failover and retries
 - [x] Coverage for Canvas RPC/UI behavior
 - [x] Unit and gateway coverage for Canvas export snapshots

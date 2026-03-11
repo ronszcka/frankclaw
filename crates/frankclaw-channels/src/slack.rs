@@ -474,6 +474,16 @@ fn parse_slack_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 mod tests {
     use super::*;
 
+    fn fixture(name: &str) -> serde_json::Value {
+        match name {
+            "event_message_with_file" => serde_json::from_str(include_str!(
+                "fixture_slack_event_message_with_file.json"
+            ))
+            .expect("fixture should parse"),
+            _ => panic!("unknown fixture: {name}"),
+        }
+    }
+
     #[test]
     fn parse_event_message_detects_group_mentions_and_threads() {
         let inbound = parse_event_message(
@@ -538,6 +548,21 @@ mod tests {
         assert_eq!(inbound.text.as_deref(), Some("<media:attachment>"));
         assert_eq!(inbound.attachments.len(), 1);
         assert_eq!(inbound.attachments[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(
+            inbound.attachments[0].url.as_deref(),
+            Some("https://files.example/report.pdf")
+        );
+    }
+
+    #[test]
+    fn parse_event_message_matches_contract_fixture_shape() {
+        let inbound = parse_event_message(&fixture("event_message_with_file"), Some("UBOT"))
+            .expect("fixture should parse");
+
+        assert_eq!(inbound.channel.as_str(), "slack");
+        assert_eq!(inbound.thread_id.as_deref(), Some("C123"));
+        assert_eq!(inbound.attachments.len(), 1);
+        assert_eq!(inbound.attachments[0].mime_type, "application/pdf");
         assert_eq!(
             inbound.attachments[0].url.as_deref(),
             Some("https://files.example/report.pdf")

@@ -348,6 +348,16 @@ mod tests {
     use super::*;
     use secrecy::SecretString;
 
+    fn fixture(name: &str) -> serde_json::Value {
+        match name {
+            "media_webhook" => serde_json::from_str(include_str!(
+                "fixture_whatsapp_media_webhook.json"
+            ))
+            .expect("fixture should parse"),
+            _ => panic!("unknown fixture: {name}"),
+        }
+    }
+
     #[test]
     fn parse_webhook_payload_extracts_text_messages() {
         let payload = serde_json::json!({
@@ -413,6 +423,20 @@ mod tests {
         assert_eq!(messages[0].text.as_deref(), Some("<media:image>"));
         assert_eq!(messages[0].attachments.len(), 1);
         assert_eq!(messages[0].attachments[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn parse_webhook_payload_matches_contract_fixture_shape() {
+        let mut payload = fixture("media_webhook");
+        payload["entry"][0]["changes"][0]["value"]["metadata"] = serde_json::json!({
+            "phone_number_id": "12345"
+        });
+
+        let messages = parse_webhook_payload(&payload);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].channel.as_str(), "whatsapp");
+        assert_eq!(messages[0].text.as_deref(), Some("<media:image>"));
+        assert_eq!(messages[0].attachments[0].mime_type, "image/jpeg");
     }
 
     #[test]

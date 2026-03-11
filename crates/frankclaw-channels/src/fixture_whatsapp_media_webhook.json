@@ -1,0 +1,23 @@
+{
+  "entry": [
+    {
+      "changes": [
+        {
+          "value": {
+            "messages": [
+              {
+                "from": "15551234567",
+                "id": "wamid.1",
+                "timestamp": "1710000000",
+                "type": "image",
+                "image": {
+                  "mime_type": "image/jpeg"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

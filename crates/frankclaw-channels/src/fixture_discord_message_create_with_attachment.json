@@ -1,0 +1,21 @@
+{
+  "id": "msg-1",
+  "channel_id": "chan-1",
+  "author": {
+    "id": "user-1",
+    "username": "alice",
+    "bot": false
+  },
+  "content": "image upload",
+  "timestamp": "2025-02-24T10:00:00.000000+00:00",
+  "attachments": [
+    {
+      "id": "att-1",
+      "filename": "photo.png",
+      "size": 2048,
+      "content_type": "image/png",
+      "url": "https://cdn.discordapp.com/attachments/att-1/photo.png"
+    }
+  ],
+  "mentions": []
+}
