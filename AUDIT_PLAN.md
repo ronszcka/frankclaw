@@ -28,7 +28,7 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 9. [Browser Automation & Tools](#9-browser-automation--tools) — DONE
 10. [Session Management](#10-session-management) — DONE
 11. [Canvas](#11-canvas) — DONE
-12. [Crypto & Auth](#12-crypto--auth) — TODO
+12. [Crypto & Auth](#12-crypto--auth) — DONE
 13. [Cron Service](#13-cron-service) — TODO
 14. [Webhooks & Config Reload](#14-webhooks--config-reload) — TODO
 
@@ -389,29 +389,29 @@ is audited, fixes are implemented, tests are added, and the section is marked do
 
 ## 12. Crypto & Auth
 
-**Status:** TODO
+**Status:** DONE
 
 ### Critical
 
-- [ ] **Nonce uniqueness guarantee**: ChaCha20-Poly1305 nonce is 96 bits, generated randomly. With high message volume, birthday collision risk exists around 2^48 messages. Verify nonce generation uses a CSPRNG and consider adding a counter component.
-- [ ] **Timing-safe comparison coverage**: Audit all credential comparison code paths. Verify `verify_token_eq()` is used consistently — no raw `==` comparison on secrets anywhere.
+- [x] **Nonce uniqueness guarantee**: Verified — `encrypt()` uses `rand::thread_rng().fill_bytes()` which is a CSPRNG (OS-backed). 96-bit random nonce collision probability is ~2^-48 per pair, negligible for a session store. Added regression test verifying 50 consecutive nonces are all unique.
+- [x] **Timing-safe comparison coverage**: Audited all code paths. Found and fixed one raw `==` comparison in `WhatsAppChannel::verify_token_matches()` — replaced with `frankclaw_crypto::verify_token_eq()`. All other secret comparisons use constant-time functions (HMAC verify, Argon2 verify, `verify_token_eq`).
 
 ### High
 
-- [ ] **Key derivation salt uniqueness**: `derive_subkey()` uses HMAC-SHA256 with context string. Verify each context string is unique across all derivation call sites (e.g., "session", "config", "media" must not overlap).
-- [ ] **Argon2id parameter validation**: Verify Argon2id parameters (t=3, m=64MB, p=4) match OWASP recommendations. Ensure password hashing doesn't block the async runtime (should run in spawn_blocking).
-- [ ] **Master key zeroing on drop**: Verify `MasterKey` implements `ZeroizeOnDrop` and test that memory is actually zeroed after drop (may need unsafe test code or external tool verification).
-- [ ] **Rate limiter bypass prevention**: Verify the auth rate limiter cannot be bypassed by rotating source IPs. Consider account-level rate limiting in addition to IP-level.
+- [x] **Key derivation salt uniqueness**: Verified — only one `derive_subkey` call site exists with context `"session"`. No overlapping contexts. HMAC-SHA256 KDF is deterministic per (master_key, context) pair.
+- [x] **Argon2id parameter validation**: Verified — parameters are t=3, m=64KB (64*1024 in argon2 API = 64MB), p=4 matching OWASP minimums. Password hashing is synchronous but the session store wraps it in `spawn_blocking`.
+- [x] **Master key zeroing on drop**: Verified — `MasterKey` derives `ZeroizeOnDrop` via `#[derive(ZeroizeOnDrop)]` and has `#[zeroize]` on the `bytes` field. Debug impl prints `[REDACTED]`.
+- [ ] **Rate limiter bypass prevention**: Deferred — current rate limiter is IP-based. Account-level rate limiting requires changes to the auth middleware.
 
 ### Medium
 
-- [ ] **Clock skew tolerance for device auth**: If device pairing uses timestamps, allow reasonable clock skew (±120 seconds). Validate timestamps are not in the far future.
-- [ ] **Token entropy verification**: Verify `generate_token()` produces 256 bits of entropy. Test that generated tokens pass basic randomness checks (no obvious patterns, correct base64url encoding length).
+- [ ] **Clock skew tolerance for device auth**: Not applicable — FrankClaw uses token auth, not timestamp-based device pairing.
+- [x] **Token entropy verification**: Verified — `generate_token()` produces 32 bytes (256 bits) from CSPRNG, base64url encoded to 43 chars. Added regression tests for entropy quality (byte variance across 100 tokens).
 
 ### Low
 
-- [ ] **Crypto error messages**: Ensure crypto error messages never leak key material, plaintext, or nonce values. Only report error type and context.
-- [ ] **PHC format compatibility**: Verify Argon2id PHC-format hash strings are compatible with standard tools (e.g., `argon2` CLI) for debugging and migration.
+- [x] **Crypto error messages**: Verified — all `CryptoError` variants contain only error type descriptions. No key material, plaintext, or nonce values leak in error messages.
+- [x] **PHC format compatibility**: Verified — `hash_format_is_phc` test confirms output starts with `$argon2id$`, standard PHC format compatible with `argon2` CLI tools.
 
 ---
 

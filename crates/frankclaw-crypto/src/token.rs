@@ -71,4 +71,37 @@ mod tests {
     fn verify_different_lengths() {
         assert!(!verify_token_eq("short", "longer-string"));
     }
+
+    #[test]
+    fn token_has_256_bits_entropy() {
+        let token = generate_token();
+        let decoded = URL_SAFE_NO_PAD.decode(&token).expect("token should be valid base64url");
+        assert_eq!(decoded.len(), 32, "token should be 32 bytes (256 bits)");
+    }
+
+    #[test]
+    fn tokens_have_no_obvious_patterns() {
+        // Generate 100 tokens and verify byte distribution isn't degenerate.
+        let tokens: Vec<Vec<u8>> = (0..100)
+            .map(|_| URL_SAFE_NO_PAD.decode(generate_token()).unwrap())
+            .collect();
+        // Each byte position should have some variance.
+        for pos in 0..32 {
+            let values: std::collections::HashSet<u8> =
+                tokens.iter().map(|t| t[pos]).collect();
+            assert!(
+                values.len() > 5,
+                "byte position {pos} should have varied values, got {}",
+                values.len()
+            );
+        }
+    }
+
+    #[test]
+    fn constant_time_eq_catches_single_bit_diff() {
+        let a = [0u8; 32];
+        let mut b = [0u8; 32];
+        b[31] = 1; // Single bit difference in last byte.
+        assert!(!constant_time_eq(&a, &b));
+    }
 }

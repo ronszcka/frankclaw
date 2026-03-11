@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 frankclaw-core = { workspace = true }
+frankclaw-crypto = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

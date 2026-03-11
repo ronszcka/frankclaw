@@ -49,7 +49,7 @@ impl WhatsAppChannel {
     }
 
     pub fn verify_token_matches(&self, candidate: &str) -> bool {
-        candidate.trim() == self.verify_token.expose_secret()
+        frankclaw_crypto::verify_token_eq(candidate.trim(), self.verify_token.expose_secret())
     }
 
     pub fn verify_signature(&self, body: &[u8], signature_header: Option<&str>) -> Result<()> {

@@ -100,4 +100,23 @@ mod tests {
         assert_ne!(b1.nonce, b2.nonce);
         assert_ne!(b1.ciphertext, b2.ciphertext);
     }
+
+    #[test]
+    fn nonces_from_csprng_have_entropy() {
+        let key = [99u8; 32];
+        // Generate 50 blobs and verify all nonces are unique.
+        let nonces: Vec<[u8; 12]> = (0..50)
+            .map(|_| encrypt(&key, b"test").unwrap().nonce)
+            .collect();
+        let unique: std::collections::HashSet<[u8; 12]> = nonces.into_iter().collect();
+        assert_eq!(unique.len(), 50, "all 50 nonces should be unique");
+    }
+
+    #[test]
+    fn empty_plaintext_roundtrip() {
+        let key = [99u8; 32];
+        let blob = encrypt(&key, b"").unwrap();
+        let decrypted = decrypt(&key, &blob).unwrap();
+        assert!(decrypted.is_empty());
+    }
 }
