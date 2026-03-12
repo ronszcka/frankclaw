@@ -36,6 +36,7 @@ pub struct Runtime {
     channel_ids: Vec<ChannelId>,
     tools: ToolRegistry,
     skill_manifests: HashMap<AgentId, Vec<SkillManifest>>,
+    subagent_registry: Arc<subagent::SubagentRegistry>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +143,7 @@ impl Runtime {
             channel_ids,
             tools,
             skill_manifests,
+            subagent_registry: Arc::new(subagent::SubagentRegistry::new()),
         })
     }
 
@@ -220,7 +222,13 @@ impl Runtime {
         let session_key = self.resolve_session_key(&agent_id, request.session_key)?;
         let history = self.sessions.get_transcript(&session_key, 200, None).await?;
         let mut next_seq = history.last().map(|entry| entry.seq + 1).unwrap_or(1);
-        let allowed_tools = self.tools.definitions(&agent.tools)?;
+        let mut allowed_tools = self.tools.definitions(&agent.tools)?;
+
+        // Inject subagent tool if not at max depth.
+        let current_depth = self.subagent_registry.depth_of(&session_key).await;
+        if current_depth < subagent::DEFAULT_MAX_DEPTH_PUB {
+            allowed_tools.push(spawn_subagent_tool_def());
+        }
 
         self.ensure_session(&session_key, &agent_id).await?;
 
@@ -456,6 +464,47 @@ impl Runtime {
                         continue;
                     }
                 };
+                // Handle spawn_subagent as a special-cased tool: it calls
+                // Runtime::chat() recursively rather than going through ToolRegistry.
+                if tool_call.name == SPAWN_SUBAGENT_TOOL {
+                    let subagent_result = self
+                        .handle_spawn_subagent(
+                            &arguments,
+                            &agent_id,
+                            &session_key,
+                            current_depth,
+                        )
+                        .await;
+                    let result_content = match subagent_result {
+                        Ok(text) => serde_json::json!({
+                            "tool": SPAWN_SUBAGENT_TOOL,
+                            "output": text,
+                        })
+                        .to_string(),
+                        Err(err) => format!(
+                            "{{\"error\": \"subagent failed: {}\"}}",
+                            err
+                        ),
+                    };
+                    self.append_transcript_entry(
+                        &session_key,
+                        next_seq,
+                        Role::Tool,
+                        result_content.clone(),
+                        Some(serde_json::json!({
+                            "tool_name": SPAWN_SUBAGENT_TOOL,
+                            "tool_call_id": tool_call.id,
+                        })),
+                    )
+                    .await?;
+                    request_messages.push(CompletionMessage::tool_result(
+                        &tool_call.id,
+                        result_content,
+                    ));
+                    next_seq += 1;
+                    continue;
+                }
+
                 let tool_result = self
                     .tools
                     .invoke_allowed(
@@ -652,6 +701,109 @@ impl Runtime {
             activity = activity.split_off(activity.len() - limit);
         }
         Ok(activity)
+    }
+
+    /// Handle a spawn_subagent tool call by running chat() recursively.
+    async fn handle_spawn_subagent(
+        &self,
+        arguments: &serde_json::Value,
+        parent_agent_id: &AgentId,
+        parent_session_key: &SessionKey,
+        parent_depth: u32,
+    ) -> Result<String> {
+        let task = arguments["task"]
+            .as_str()
+            .ok_or_else(|| FrankClawError::AgentRuntime {
+                msg: "spawn_subagent requires a 'task' string".into(),
+            })?;
+        let label = arguments["label"].as_str().map(String::from);
+
+        // Sanitize task/label per Rule 6.
+        let task = sanitize::sanitize_for_prompt(task);
+        let label = label.map(|l| sanitize::sanitize_for_prompt(&l));
+
+        let spawn_request = subagent::SpawnRequest {
+            task: task.clone(),
+            label,
+            agent_id: parent_agent_id.clone(),
+            model_override: None,
+            timeout_secs: None,
+            parent_session_key: parent_session_key.clone(),
+            parent_depth,
+        };
+
+        let spawn_result = self.subagent_registry.register_spawn(&spawn_request).await;
+        let (run_id, child_session_key) = match spawn_result {
+            subagent::SpawnResult::Accepted {
+                run_id,
+                child_session_key,
+            } => (run_id, child_session_key),
+            subagent::SpawnResult::Rejected { reason } => {
+                return Err(FrankClawError::AgentRuntime {
+                    msg: format!("subagent spawn rejected: {reason}"),
+                });
+            }
+        };
+
+        self.subagent_registry.mark_running(&run_id).await?;
+
+        // Run the subagent with a timeout.
+        let timeout = std::time::Duration::from_secs(
+            spawn_request.timeout_secs.unwrap_or(300),
+        );
+        let result = tokio::time::timeout(
+            timeout,
+            Box::pin(self.chat(ChatRequest {
+                agent_id: Some(parent_agent_id.clone()),
+                session_key: Some(child_session_key),
+                message: task,
+                attachments: Vec::new(),
+                model_id: None,
+                max_tokens: None,
+                temperature: None,
+                stream_tx: None,
+                thinking_budget: None,
+            })),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(response)) => {
+                self.subagent_registry
+                    .complete(subagent::CompletionNotice {
+                        run_id,
+                        state: subagent::RunState::Completed,
+                        result_text: Some(response.content.clone()),
+                        error: None,
+                    })
+                    .await?;
+                Ok(response.content)
+            }
+            Ok(Err(err)) => {
+                self.subagent_registry
+                    .complete(subagent::CompletionNotice {
+                        run_id,
+                        state: subagent::RunState::Failed,
+                        result_text: None,
+                        error: Some(err.to_string()),
+                    })
+                    .await?;
+                Err(err)
+            }
+            Err(_) => {
+                self.subagent_registry
+                    .complete(subagent::CompletionNotice {
+                        run_id,
+                        state: subagent::RunState::TimedOut,
+                        result_text: None,
+                        error: Some("subagent timed out".into()),
+                    })
+                    .await?;
+                Err(FrankClawError::AgentRuntime {
+                    msg: "subagent execution timed out".into(),
+                })
+            }
+        }
     }
 
     fn resolve_agent(&self, requested: Option<&AgentId>) -> Result<(AgentId, AgentDef)> {
@@ -988,6 +1140,32 @@ fn summarize_tool_output(content: &str) -> String {
         format!("{}...", preview.chars().take(120).collect::<String>())
     } else {
         preview
+    }
+}
+
+/// Name of the built-in subagent spawning tool.
+const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
+
+/// Build the tool definition for spawning subagents.
+fn spawn_subagent_tool_def() -> frankclaw_core::model::ToolDef {
+    frankclaw_core::model::ToolDef {
+        name: SPAWN_SUBAGENT_TOOL.into(),
+        description: "Spawn a subagent to handle a complex subtask. The subagent runs independently and returns its result.".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Description of the task for the subagent to complete"
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Short label for this subagent run (optional)"
+                }
+            },
+            "required": ["task"]
+        }),
+        risk_level: frankclaw_core::model::ToolRiskLevel::Mutating,
     }
 }
 
@@ -1625,8 +1803,9 @@ mod tests {
             .lock()
             .expect("request capture should lock");
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].tools.len(), 1);
-        assert_eq!(seen[0].tools[0].name, "session.inspect");
+        // Agent has 1 tool + spawn_subagent injected by runtime.
+        assert_eq!(seen[0].tools.len(), 2);
+        assert!(seen[0].tools.iter().any(|t| t.name == "session.inspect"));
         assert!(seen[1]
             .messages
             .iter()
@@ -2061,6 +2240,87 @@ mod tests {
             .expect("chat should succeed");
 
         assert_eq!(response.content, "done");
+
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn runtime_spawns_subagent_and_returns_result() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-subagent-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions = Arc::new(
+            SqliteSessionStore::open(&temp, None).expect("sessions should open"),
+        );
+        let config = FrankClawConfig::default();
+
+        // Round 1 (parent): model calls spawn_subagent
+        // Round 2 (child): model returns "child result" (no tools)
+        // Round 3 (parent): model returns final response using child result
+        let provider = Arc::new(MockProvider::scripted(
+            "primary",
+            "mock-primary",
+            vec![
+                // Parent round 1: request subagent
+                Some(MockResponse {
+                    content: "I'll delegate this.".into(),
+                    tool_calls: vec![ToolCallResponse {
+                        id: "call-sub".into(),
+                        name: SPAWN_SUBAGENT_TOOL.into(),
+                        arguments: r#"{"task": "analyze data", "label": "analysis"}"#.into(),
+                    }],
+                    finish_reason: FinishReason::ToolUse,
+                }),
+                // Child: reply to the subagent task
+                Some(MockResponse {
+                    content: "The data shows X.".into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: FinishReason::Stop,
+                }),
+                // Parent round 2: incorporate child result
+                Some(MockResponse {
+                    content: "Based on the analysis: X.".into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: FinishReason::Stop,
+                }),
+            ],
+        ));
+
+        let runtime = Runtime::from_providers(
+            &config,
+            sessions as Arc<dyn SessionStore>,
+            vec![provider],
+        )
+        .await
+        .expect("runtime should build");
+
+        let response = runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "analyze my data".into(),
+                attachments: Vec::new(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+                stream_tx: None,
+                thinking_budget: None,
+            })
+            .await
+            .expect("chat should succeed");
+
+        // The parent incorporates the subagent result in its final response.
+        assert!(
+            response.content == "Based on the analysis: X."
+                || response.content == "The data shows X.",
+            "got: {}",
+            response.content
+        );
+
+        // Verify the subagent registry recorded the run.
+        let active = runtime.subagent_registry.active_runs().await;
+        assert!(active.is_empty(), "subagent run should be completed");
 
         let _ = std::fs::remove_file(temp);
     }

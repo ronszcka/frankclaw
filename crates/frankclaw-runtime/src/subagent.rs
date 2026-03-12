@@ -18,6 +18,9 @@ use frankclaw_core::types::{AgentId, SessionKey};
 /// Maximum spawn depth (parent=0, child=1, grandchild=2, etc.).
 const DEFAULT_MAX_DEPTH: u32 = 3;
 
+/// Public access to the default max depth for the runtime.
+pub const DEFAULT_MAX_DEPTH_PUB: u32 = DEFAULT_MAX_DEPTH;
+
 /// Maximum concurrent children per parent session.
 const DEFAULT_MAX_CHILDREN: usize = 5;
 
