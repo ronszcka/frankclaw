@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::model::*;
+use frankclaw_core::types::Role;
 
 /// Sanitize a tool name for OpenAI compatibility (dots → underscores).
 /// OpenAI requires tool names to match `^[a-zA-Z0-9_-]+$`.
@@ -33,10 +34,43 @@ pub(crate) fn build_request_body(request: &CompletionRequest) -> serde_json::Val
             }));
         }
         for msg in &request.messages {
-            msgs.push(serde_json::json!({
-                "role": msg.role,
-                "content": msg.content,
-            }));
+            if msg.role == Role::Assistant && !msg.tool_calls.is_empty() {
+                // Assistant message with tool calls — use OpenAI's structured format.
+                let tool_calls: Vec<serde_json::Value> = msg
+                    .tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": sanitize_tool_name(&tc.name),
+                                "arguments": tc.arguments,
+                            }
+                        })
+                    })
+                    .collect();
+                let mut m = serde_json::json!({
+                    "role": "assistant",
+                    "tool_calls": tool_calls,
+                });
+                if !msg.content.is_empty() {
+                    m["content"] = serde_json::json!(msg.content);
+                }
+                msgs.push(m);
+            } else if msg.role == Role::Tool {
+                // Tool result — must include tool_call_id for OpenAI.
+                msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": msg.tool_call_id.as_deref().unwrap_or("unknown"),
+                    "content": msg.content,
+                }));
+            } else {
+                msgs.push(serde_json::json!({
+                    "role": msg.role,
+                    "content": msg.content,
+                }));
+            }
         }
         msgs
     };

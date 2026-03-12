@@ -650,10 +650,7 @@ mod tests {
     fn build_request_body_includes_thinking_budget() {
         let request = CompletionRequest {
             model_id: "claude-sonnet-4-6".into(),
-            messages: vec![CompletionMessage {
-                role: Role::User,
-                content: "think hard".into(),
-            }],
+            messages: vec![CompletionMessage::text(Role::User, "think hard")],
             max_tokens: Some(4096),
             temperature: Some(0.5),
             system: None,
@@ -671,10 +668,7 @@ mod tests {
     fn build_request_body_omits_thinking_when_none() {
         let request = CompletionRequest {
             model_id: "claude-sonnet-4-6".into(),
-            messages: vec![CompletionMessage {
-                role: Role::User,
-                content: "hello".into(),
-            }],
+            messages: vec![CompletionMessage::text(Role::User, "hello")],
             max_tokens: Some(4096),
             temperature: Some(0.7),
             system: None,

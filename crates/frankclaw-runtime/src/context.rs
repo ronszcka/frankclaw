@@ -124,10 +124,7 @@ pub fn optimize_context(
 
     kept.insert(
         0,
-        CompletionMessage {
-            role: Role::User,
-            content: summary,
-        },
+        CompletionMessage::text(Role::User, summary),
     );
 
     let estimated_tokens = estimate_messages_tokens(&kept);
@@ -181,10 +178,7 @@ mod tests {
     use super::*;
 
     fn msg(role: Role, content: &str) -> CompletionMessage {
-        CompletionMessage {
-            role,
-            content: content.to_string(),
-        }
+        CompletionMessage::text(role, content)
     }
 
     fn test_model(context_window: u32) -> ModelDef {

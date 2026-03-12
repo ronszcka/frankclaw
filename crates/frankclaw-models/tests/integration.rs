@@ -68,10 +68,7 @@ fn anthropic_key() -> Option<SecretString> {
 fn simple_request(model: &str, prompt: &str) -> CompletionRequest {
     CompletionRequest {
         model_id: model.into(),
-        messages: vec![CompletionMessage {
-            role: Role::User,
-            content: prompt.into(),
-        }],
+        messages: vec![CompletionMessage::text(Role::User, prompt)],
         max_tokens: Some(50),
         temperature: Some(0.0),
         system: None,
@@ -417,10 +414,7 @@ async fn anthropic_streaming_with_system_prompt() {
 
     let request = CompletionRequest {
         model_id: "claude-haiku-4-5-20251001".into(),
-        messages: vec![CompletionMessage {
-            role: Role::User,
-            content: "What color is the sky?".into(),
-        }],
+        messages: vec![CompletionMessage::text(Role::User, "What color is the sky?")],
         max_tokens: Some(30),
         temperature: Some(0.0),
         system: Some("You must always reply in exactly one word.".into()),

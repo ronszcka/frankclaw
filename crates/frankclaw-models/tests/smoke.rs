@@ -91,10 +91,7 @@ fn ollama_available() -> bool {
 fn simple_request(model: &str, prompt: &str) -> CompletionRequest {
     CompletionRequest {
         model_id: model.into(),
-        messages: vec![CompletionMessage {
-            role: Role::User,
-            content: prompt.into(),
-        }],
+        messages: vec![CompletionMessage::text(Role::User, prompt)],
         max_tokens: Some(50),
         temperature: Some(0.0),
         system: None,
@@ -297,10 +294,7 @@ async fn anthropic_system_prompt() {
 
     let request = CompletionRequest {
         model_id: "claude-haiku-4-5-20251001".into(),
-        messages: vec![CompletionMessage {
-            role: Role::User,
-            content: "What is the secret word?".into(),
-        }],
+        messages: vec![CompletionMessage::text(Role::User, "What is the secret word?")],
         max_tokens: Some(20),
         temperature: Some(0.0),
         system: Some("The secret word is 'banana'. Always reply with only the secret word.".into()),

@@ -182,10 +182,7 @@ mod tests {
     #[test]
     fn check_prompt_size_within_limit() {
         let msgs = vec![
-            crate::CompletionMessage {
-                role: crate::Role::User,
-                content: "hello".into(),
-            },
+            crate::CompletionMessage::text(crate::Role::User, "hello"),
         ];
         assert!(check_prompt_size(&msgs, Some("system")));
     }
@@ -194,10 +191,7 @@ mod tests {
     fn check_prompt_size_over_limit() {
         let big = "x".repeat(MAX_PROMPT_BYTES + 1);
         let msgs = vec![
-            crate::CompletionMessage {
-                role: crate::Role::User,
-                content: big,
-            },
+            crate::CompletionMessage::text(crate::Role::User, big),
         ];
         assert!(!check_prompt_size(&msgs, None));
     }
@@ -207,14 +201,8 @@ mod tests {
         // Each message is under the limit, but combined they exceed it.
         let half = "x".repeat(MAX_PROMPT_BYTES / 2 + 1);
         let msgs = vec![
-            crate::CompletionMessage {
-                role: crate::Role::User,
-                content: half.clone(),
-            },
-            crate::CompletionMessage {
-                role: crate::Role::Assistant,
-                content: half,
-            },
+            crate::CompletionMessage::text(crate::Role::User, half.clone()),
+            crate::CompletionMessage::text(crate::Role::Assistant, half),
         ];
         assert!(!check_prompt_size(&msgs, None));
     }

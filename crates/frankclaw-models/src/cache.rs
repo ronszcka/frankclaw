@@ -220,10 +220,7 @@ mod tests {
     fn simple_request() -> CompletionRequest {
         CompletionRequest {
             model_id: "test-model".into(),
-            messages: vec![CompletionMessage {
-                role: Role::User,
-                content: "hello".into(),
-            }],
+            messages: vec![CompletionMessage::text(Role::User, "hello")],
             max_tokens: None,
             temperature: None,
             system: None,
@@ -235,10 +232,7 @@ mod tests {
     fn different_request() -> CompletionRequest {
         CompletionRequest {
             model_id: "test-model".into(),
-            messages: vec![CompletionMessage {
-                role: Role::User,
-                content: "goodbye".into(),
-            }],
+            messages: vec![CompletionMessage::text(Role::User, "goodbye")],
             max_tokens: None,
             temperature: None,
             system: None,
@@ -250,10 +244,7 @@ mod tests {
     fn tool_request() -> CompletionRequest {
         CompletionRequest {
             model_id: "test-model".into(),
-            messages: vec![CompletionMessage {
-                role: Role::User,
-                content: "use tool".into(),
-            }],
+            messages: vec![CompletionMessage::text(Role::User, "use tool")],
             max_tokens: None,
             temperature: None,
             system: None,
@@ -403,10 +394,7 @@ mod tests {
         // Third entry should evict the oldest
         let third = CompletionRequest {
             model_id: "test-model".into(),
-            messages: vec![CompletionMessage {
-                role: Role::User,
-                content: "third".into(),
-            }],
+            messages: vec![CompletionMessage::text(Role::User, "third")],
             max_tokens: None,
             temperature: None,
             system: None,

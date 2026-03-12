@@ -247,14 +247,8 @@ impl Runtime {
 
         let raw_messages: Vec<CompletionMessage> = history
             .iter()
-            .map(|entry| CompletionMessage {
-                role: entry.role,
-                content: entry.content.clone(),
-            })
-            .chain(std::iter::once(CompletionMessage {
-                role: Role::User,
-                content: sanitized_message.clone(),
-            }))
+            .map(|entry| transcript_entry_to_message(entry))
+            .chain(std::iter::once(CompletionMessage::text(Role::User, sanitized_message.clone())))
             .collect();
 
         // Build dynamic system prompt with runtime context.
@@ -378,10 +372,10 @@ impl Runtime {
                 })),
             )
             .await?;
-            request_messages.push(CompletionMessage {
-                role: Role::Assistant,
-                content: assistant_message,
-            });
+            request_messages.push(CompletionMessage::assistant_tool_calls(
+                assistant_message,
+                response.tool_calls.clone(),
+            ));
             next_seq += 1;
 
             for tool_call in response.tool_calls {
@@ -460,10 +454,10 @@ impl Runtime {
                     })),
                 )
                 .await?;
-                request_messages.push(CompletionMessage {
-                    role: Role::Tool,
-                    content: tool_content,
-                });
+                request_messages.push(CompletionMessage::tool_result(
+                    &tool_call.id,
+                    tool_content,
+                ));
                 next_seq += 1;
             }
 
@@ -797,6 +791,40 @@ fn truncate_tool_output(output: &str) -> String {
         "{}\n\n... ({} characters omitted) ...\n\n{}",
         head, omitted, tail
     )
+}
+
+/// Convert a transcript entry back into a `CompletionMessage`, restoring tool call
+/// metadata from the entry's JSON metadata field.
+fn transcript_entry_to_message(entry: &frankclaw_core::session::TranscriptEntry) -> CompletionMessage {
+    let metadata = entry.metadata.as_ref();
+
+    // Assistant messages with tool_calls in metadata.
+    if entry.role == Role::Assistant {
+        if let Some(calls) = metadata.and_then(|m| m["tool_calls"].as_array()) {
+            let tool_calls: Vec<ToolCallResponse> = calls
+                .iter()
+                .filter_map(|c| {
+                    Some(ToolCallResponse {
+                        id: c["id"].as_str()?.to_string(),
+                        name: c["name"].as_str()?.to_string(),
+                        arguments: c["arguments"].as_str().unwrap_or("{}").to_string(),
+                    })
+                })
+                .collect();
+            if !tool_calls.is_empty() {
+                return CompletionMessage::assistant_tool_calls(entry.content.clone(), tool_calls);
+            }
+        }
+    }
+
+    // Tool result messages with tool_call_id in metadata.
+    if entry.role == Role::Tool {
+        if let Some(call_id) = metadata.and_then(|m| m["tool_call_id"].as_str()) {
+            return CompletionMessage::tool_result(call_id, entry.content.clone());
+        }
+    }
+
+    CompletionMessage::text(entry.role, entry.content.clone())
 }
 
 fn build_tool_request_message(content: &str, tool_calls: &[ToolCallResponse]) -> String {

@@ -63,7 +63,47 @@ pub struct ModelDef {
 pub struct CompletionMessage {
     pub role: Role,
     pub content: String,
-    // Tool calls, images, etc. will be added as needed.
+    /// Tool calls requested by the assistant (present when role is Assistant).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallResponse>,
+    /// The tool_call_id this message is responding to (present when role is Tool).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl CompletionMessage {
+    /// Create a simple text message (no tool calls).
+    pub fn text(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// Create an assistant message with tool calls.
+    pub fn assistant_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCallResponse>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// Create a tool result message.
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
 }
 
 /// Request to a model provider.
@@ -144,7 +184,7 @@ pub struct CompletionResponse {
 }
 
 /// A tool call in a completion response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResponse {
     pub id: String,
     pub name: String,
