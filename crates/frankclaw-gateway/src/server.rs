@@ -1163,6 +1163,72 @@ async fn process_inbound_message_with_target(
         .clone()
         .unwrap_or_else(|| state.runtime.session_key_for_inbound(&inbound));
 
+    // Set up streaming: if the channel supports edit-in-place, wire a stream_tx
+    // so the user sees progress during multi-round tool execution.
+    let channel_for_stream = state.channel(&inbound.channel);
+    let supports_edit = channel_for_stream
+        .as_ref()
+        .map(|ch| ch.capabilities().edit)
+        .unwrap_or(false);
+
+    let (stream_tx, stream_rx) = if supports_edit {
+        let (tx, rx) = tokio::sync::mpsc::channel::<frankclaw_core::model::StreamDelta>(64);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    // Spawn a background task that forwards stream deltas to the channel
+    // by editing a "draft" message in place.
+    let stream_handle = if let (Some(mut rx), Some(channel)) = (stream_rx, &channel_for_stream) {
+        let channel = channel.clone();
+        let outbound_base = OutboundMessage {
+            channel: inbound.channel.clone(),
+            account_id: inbound.account_id.clone(),
+            to: inbound.sender_id.clone(),
+            thread_id: inbound.thread_id.clone(),
+            text: "...".into(),
+            attachments: Vec::new(),
+            reply_to: inbound.platform_message_id.clone(),
+        };
+        Some(tokio::spawn(async move {
+            // Send initial "thinking" placeholder.
+            let send_result = channel.send(outbound_base).await;
+            let draft_id = match send_result {
+                Ok(frankclaw_core::channel::SendResult::Sent { platform_message_id }) => {
+                    Some(platform_message_id)
+                }
+                _ => None,
+            };
+
+            let mut accumulated = String::new();
+            let mut last_edit = tokio::time::Instant::now();
+            let edit_interval = std::time::Duration::from_millis(1500);
+
+            while let Some(delta) = rx.recv().await {
+                if let frankclaw_core::model::StreamDelta::Text(text) = delta {
+                    accumulated.push_str(&text);
+                    // Throttle edits to avoid rate limits.
+                    if last_edit.elapsed() >= edit_interval {
+                        if let Some(ref msg_id) = draft_id {
+                            let target = frankclaw_core::channel::EditMessageTarget {
+                                account_id: String::new(), // filled below
+                                to: String::new(),
+                                thread_id: None,
+                                platform_message_id: msg_id.clone(),
+                            };
+                            let _ = channel.edit_message(&target, &accumulated).await;
+                            last_edit = tokio::time::Instant::now();
+                        }
+                    }
+                }
+            }
+            draft_id
+        }))
+    } else {
+        None
+    };
+
     let response = state
         .runtime
         .chat(frankclaw_runtime::ChatRequest {
@@ -1173,12 +1239,26 @@ async fn process_inbound_message_with_target(
             model_id: None,
             max_tokens: None,
             temperature: None,
-            stream_tx: None,
+            stream_tx,
             thinking_budget: None,
         })
         .await?;
 
-    if let Some(channel) = state.channel(&inbound.channel) {
+    // If we had a streaming draft, wait for the background task and edit with final content.
+    if let Some(handle) = stream_handle {
+        if let Ok(Some(draft_id)) = handle.await {
+            if let Some(ref channel) = channel_for_stream {
+                let target = frankclaw_core::channel::EditMessageTarget {
+                    account_id: inbound.account_id.clone(),
+                    to: inbound.sender_id.clone(),
+                    thread_id: inbound.thread_id.clone(),
+                    platform_message_id: draft_id,
+                };
+                let _ = channel.edit_message(&target, &response.content).await;
+            }
+        }
+        // Skip normal delivery — message was already sent and edited in place.
+    } else if let Some(channel) = channel_for_stream {
         let outbound = OutboundMessage {
             channel: inbound.channel.clone(),
             account_id: inbound.account_id.clone(),
