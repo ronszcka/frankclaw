@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bash;
+pub mod mcp;
 
 use std::collections::HashMap;
 use std::sync::Arc;
