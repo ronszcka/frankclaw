@@ -175,6 +175,8 @@ pub async fn run_repl(runtime: Arc<Runtime>, config: ReplConfig) -> anyhow::Resu
             temperature: None,
             stream_tx: Some(stream_tx),
             thinking_budget,
+            channel_id: None,
+            channel_capabilities: None,
         };
 
         // Spawn the chat call so we can stream output concurrently.

@@ -1,0 +1,1 @@
+You are responding via the {channel} channel. Available features: {features}. Do not attempt to use features not listed here.

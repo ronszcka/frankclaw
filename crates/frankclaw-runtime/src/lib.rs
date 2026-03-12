@@ -15,7 +15,7 @@ use secrecy::SecretString;
 
 use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
 use frankclaw_core::error::{FrankClawError, Result};
-use frankclaw_core::channel::{InboundAttachment, InboundMessage};
+use frankclaw_core::channel::{ChannelCapabilities, InboundAttachment, InboundMessage};
 use frankclaw_core::model::{
     CompletionMessage, CompletionRequest, ImageContent, ModelDef, ModelProvider, StreamDelta,
     ToolCallResponse, Usage,
@@ -51,6 +51,10 @@ pub struct ChatRequest {
     pub stream_tx: Option<tokio::sync::mpsc::Sender<StreamDelta>>,
     /// Extended thinking budget in tokens (Anthropic Claude 3.7+).
     pub thinking_budget: Option<u32>,
+    /// Channel ID for prompt hints (tells the LLM what features are available).
+    pub channel_id: Option<ChannelId>,
+    /// Channel capabilities for prompt hints.
+    pub channel_capabilities: Option<ChannelCapabilities>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,7 +299,14 @@ impl Runtime {
 
         // Build dynamic system prompt with runtime context.
         let tool_names: Vec<String> = allowed_tools.iter().map(|t| t.name.clone()).collect();
-        let system_prompt = self.build_system_prompt(&agent_id, &agent, &model_id, &tool_names);
+        let system_prompt = self.build_system_prompt(
+            &agent_id,
+            &agent,
+            &model_id,
+            &tool_names,
+            request.channel_id.as_ref(),
+            request.channel_capabilities.as_ref(),
+        );
         let context_result = context::optimize_context(
             raw_messages,
             &model_def,
@@ -763,6 +774,8 @@ impl Runtime {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })),
         )
         .await;
@@ -828,6 +841,8 @@ impl Runtime {
         agent: &AgentDef,
         model_id: &str,
         tool_names: &[String],
+        channel_id: Option<&ChannelId>,
+        channel_capabilities: Option<&ChannelCapabilities>,
     ) -> Option<String> {
         let mut sections: Vec<String> = Vec::new();
 
@@ -881,7 +896,29 @@ impl Runtime {
             ("tool_count", &tool_count_str),
         ]));
 
-        // Section 7: Language instruction (non-English locales)
+        // Section 7: Channel hints (tells the LLM what messaging features are available)
+        if let (Some(ch_id), Some(caps)) = (channel_id, channel_capabilities) {
+            let mut features = Vec::new();
+            if caps.threads { features.push("threads"); }
+            if caps.groups { features.push("group messages"); }
+            if caps.attachments { features.push("file attachments"); }
+            if caps.edit { features.push("message editing"); }
+            if caps.delete { features.push("message deletion"); }
+            if caps.reactions { features.push("reactions"); }
+            if caps.voice { features.push("voice messages"); }
+            if caps.inline_buttons { features.push("inline buttons"); }
+            let features_str = if features.is_empty() {
+                "text messages only".to_string()
+            } else {
+                features.join(", ")
+            };
+            sections.push(prompts::render(prompts::AGENT_CHANNEL, &[
+                ("channel", ch_id.as_str()),
+                ("features", &features_str),
+            ]));
+        }
+
+        // Section 8: Language instruction (non-English locales)
         let locale = std::env::var("FRANKCLAW_LANG")
             .ok()
             .or_else(|| {
@@ -1525,6 +1562,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -1574,6 +1613,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -1633,6 +1674,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -1704,6 +1747,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -1773,6 +1818,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -1874,6 +1921,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("should succeed with error result fed back to model");
@@ -1939,6 +1988,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect_err("too many tool calls should fail");
@@ -2053,6 +2104,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect_err("loop should be detected");
@@ -2153,6 +2206,8 @@ mod tests {
                 temperature: None,
                 stream_tx: Some(tx),
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -2235,6 +2290,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -2306,6 +2363,8 @@ mod tests {
                 temperature: None,
                 stream_tx: None,
                 thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
             })
             .await
             .expect("chat should succeed");
@@ -2321,6 +2380,118 @@ mod tests {
         // Verify the subagent registry recorded the run.
         let active = runtime.subagent_registry.active_runs().await;
         assert!(active.is_empty(), "subagent run should be completed");
+
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn system_prompt_includes_channel_hints_when_provided() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-channel-hints-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let mock = Arc::new(MockProvider::reply("primary", "mock-primary", "ok"));
+        let runtime = Runtime::from_providers(
+            &FrankClawConfig::default(),
+            sessions.clone() as Arc<dyn SessionStore>,
+            vec![mock.clone()],
+        )
+        .await
+        .expect("runtime should build");
+
+        let _response = runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "hello".into(),
+                attachments: Vec::new(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+                stream_tx: None,
+                thinking_budget: None,
+                channel_id: Some(ChannelId::new("telegram")),
+                channel_capabilities: Some(ChannelCapabilities {
+                    threads: true,
+                    groups: true,
+                    attachments: true,
+                    edit: true,
+                    delete: false,
+                    reactions: true,
+                    streaming: false,
+                    voice: false,
+                    inline_buttons: true,
+                }),
+            })
+            .await
+            .expect("chat should succeed");
+
+        let seen = mock.seen_requests.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let system = seen[0].system.as_ref().expect("system prompt should be set");
+        assert!(
+            system.contains("telegram"),
+            "system prompt should mention channel name"
+        );
+        assert!(
+            system.contains("threads"),
+            "system prompt should list threads feature"
+        );
+        assert!(
+            system.contains("inline buttons"),
+            "system prompt should list inline buttons feature"
+        );
+        assert!(
+            !system.contains("voice"),
+            "system prompt should not list disabled features"
+        );
+
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[tokio::test]
+    async fn system_prompt_omits_channel_section_when_no_channel() {
+        let temp = std::env::temp_dir().join(format!(
+            "frankclaw-runtime-no-channel-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let sessions =
+            Arc::new(SqliteSessionStore::open(&temp, None).expect("sessions should open"));
+        let mock = Arc::new(MockProvider::reply("primary", "mock-primary", "ok"));
+        let runtime = Runtime::from_providers(
+            &FrankClawConfig::default(),
+            sessions.clone() as Arc<dyn SessionStore>,
+            vec![mock.clone()],
+        )
+        .await
+        .expect("runtime should build");
+
+        let _response = runtime
+            .chat(ChatRequest {
+                agent_id: None,
+                session_key: None,
+                message: "hello".into(),
+                attachments: Vec::new(),
+                model_id: Some("mock-primary".into()),
+                max_tokens: None,
+                temperature: None,
+                stream_tx: None,
+                thinking_budget: None,
+                channel_id: None,
+                channel_capabilities: None,
+            })
+            .await
+            .expect("chat should succeed");
+
+        let seen = mock.seen_requests.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let system = seen[0].system.as_ref().expect("system prompt should be set");
+        assert!(
+            !system.contains("Available features:"),
+            "system prompt should not contain channel section when no channel provided"
+        );
 
         let _ = std::fs::remove_file(temp);
     }

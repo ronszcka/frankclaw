@@ -641,6 +641,8 @@ async fn main() -> anyhow::Result<()> {
                     temperature: None,
                     stream_tx: None,
                     thinking_budget: None,
+                    channel_id: None,
+                    channel_capabilities: None,
                 })
                 .await?;
 

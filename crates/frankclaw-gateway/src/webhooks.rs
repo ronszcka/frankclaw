@@ -97,6 +97,8 @@ pub async fn execute_request(
             temperature: None,
             stream_tx: None,
             thinking_budget: None,
+            channel_id: None,
+            channel_capabilities: None,
         })
         .await
 }

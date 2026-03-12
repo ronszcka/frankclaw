@@ -12,6 +12,7 @@ pub const AGENT_IDENTITY: &str = include_str!("../prompts/agent_identity.md");
 pub const AGENT_TOOLS: &str = include_str!("../prompts/agent_tools.md");
 pub const AGENT_SAFETY: &str = include_str!("../prompts/agent_safety.md");
 pub const AGENT_CONTEXT: &str = include_str!("../prompts/agent_context.md");
+pub const AGENT_CHANNEL: &str = include_str!("../prompts/agent_channel.md");
 
 // -- Subagent prompt sections --
 
@@ -103,12 +104,19 @@ mod tests {
     }
 
     #[test]
+    fn agent_channel_template_has_placeholders() {
+        assert!(AGENT_CHANNEL.contains("{channel}"));
+        assert!(AGENT_CHANNEL.contains("{features}"));
+    }
+
+    #[test]
     fn all_templates_are_nonempty() {
         for (name, template) in [
             ("AGENT_IDENTITY", AGENT_IDENTITY),
             ("AGENT_TOOLS", AGENT_TOOLS),
             ("AGENT_SAFETY", AGENT_SAFETY),
             ("AGENT_CONTEXT", AGENT_CONTEXT),
+            ("AGENT_CHANNEL", AGENT_CHANNEL),
             ("SUBAGENT_IDENTITY", SUBAGENT_IDENTITY),
             ("SUBAGENT_TIMEOUT", SUBAGENT_TIMEOUT),
             ("SUBAGENT_CAN_SPAWN", SUBAGENT_CAN_SPAWN),

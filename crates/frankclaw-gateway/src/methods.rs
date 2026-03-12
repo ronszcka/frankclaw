@@ -254,6 +254,8 @@ pub async fn chat_send(
             temperature,
             stream_tx,
             thinking_budget: None,
+            channel_id: None,
+            channel_capabilities: None,
         })
         .await
     {

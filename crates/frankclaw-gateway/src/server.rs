@@ -1241,6 +1241,8 @@ async fn process_inbound_message_with_target(
             temperature: None,
             stream_tx,
             thinking_budget: None,
+            channel_id: Some(inbound.channel.clone()),
+            channel_capabilities: channel_for_stream.as_ref().map(|ch| ch.capabilities()),
         })
         .await?;
 
@@ -1526,6 +1528,8 @@ async fn start_cron_runtime(
                         temperature: None,
                         stream_tx: None,
                         thinking_budget: None,
+                        channel_id: None,
+                        channel_capabilities: None,
                     })
                     .await
                 {
