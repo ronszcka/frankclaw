@@ -58,6 +58,15 @@ pub struct ModelDef {
     pub compat: ModelCompat,
 }
 
+/// An image content block attached to a message for vision-capable models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageContent {
+    /// MIME type (e.g. "image/jpeg", "image/png").
+    pub mime_type: String,
+    /// Base64-encoded image data.
+    pub data: String,
+}
+
 /// A message in a completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionMessage {
@@ -69,6 +78,9 @@ pub struct CompletionMessage {
     /// The tool_call_id this message is responding to (present when role is Tool).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Image content blocks for vision-capable models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_content: Vec<ImageContent>,
 }
 
 impl CompletionMessage {
@@ -79,6 +91,18 @@ impl CompletionMessage {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            image_content: Vec::new(),
+        }
+    }
+
+    /// Create a user message with text and images for vision-capable models.
+    pub fn with_images(content: impl Into<String>, images: Vec<ImageContent>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            image_content: images,
         }
     }
 
@@ -92,6 +116,7 @@ impl CompletionMessage {
             content: content.into(),
             tool_calls,
             tool_call_id: None,
+            image_content: Vec::new(),
         }
     }
 
@@ -102,6 +127,7 @@ impl CompletionMessage {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            image_content: Vec::new(),
         }
     }
 }

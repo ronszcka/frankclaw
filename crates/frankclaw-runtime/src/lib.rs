@@ -17,8 +17,8 @@ use frankclaw_core::config::{AgentDef, FrankClawConfig, ProviderConfig};
 use frankclaw_core::error::{FrankClawError, Result};
 use frankclaw_core::channel::{InboundAttachment, InboundMessage};
 use frankclaw_core::model::{
-    CompletionMessage, CompletionRequest, ModelDef, ModelProvider, StreamDelta, ToolCallResponse,
-    Usage,
+    CompletionMessage, CompletionRequest, ImageContent, ModelDef, ModelProvider, StreamDelta,
+    ToolCallResponse, Usage,
 };
 use frankclaw_core::session::{SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
@@ -245,10 +245,44 @@ impl Runtime {
                 }
             });
 
+        // Process image attachments for vision-capable models.
+        let image_contents = if model_def.compat.supports_vision {
+            fetch_image_attachments(&request.attachments).await
+        } else {
+            Vec::new()
+        };
+
+        // Build the user message: with images if available, text-only fallback otherwise.
+        let user_message = if !image_contents.is_empty() {
+            CompletionMessage::with_images(sanitized_message.clone(), image_contents)
+        } else if !request.attachments.is_empty() && !model_def.compat.supports_vision {
+            // Model doesn't support vision — add text description of attachments.
+            let attachment_notes: Vec<String> = request
+                .attachments
+                .iter()
+                .filter(|a| a.mime_type.starts_with("image/"))
+                .map(|a| {
+                    let name = a.filename.as_deref().unwrap_or("image");
+                    format!("[Image attached: {}]", name)
+                })
+                .collect();
+            if attachment_notes.is_empty() {
+                CompletionMessage::text(Role::User, sanitized_message.clone())
+            } else {
+                let prefix = attachment_notes.join("\n");
+                CompletionMessage::text(
+                    Role::User,
+                    format!("{}\n\n{}", prefix, sanitized_message),
+                )
+            }
+        } else {
+            CompletionMessage::text(Role::User, sanitized_message.clone())
+        };
+
         let raw_messages: Vec<CompletionMessage> = history
             .iter()
             .map(|entry| transcript_entry_to_message(entry))
-            .chain(std::iter::once(CompletionMessage::text(Role::User, sanitized_message.clone())))
+            .chain(std::iter::once(user_message))
             .collect();
 
         // Build dynamic system prompt with runtime context.
@@ -911,6 +945,61 @@ fn summarize_tool_output(content: &str) -> String {
     } else {
         preview
     }
+}
+
+/// Maximum image size for vision (5 MB, matches OpenClaw).
+const MAX_VISION_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Fetch image attachments from their URLs and encode as base64 for vision models.
+///
+/// Uses SSRF-safe fetching. Skips non-image attachments and attachments without URLs.
+/// Errors on individual images are logged but don't fail the batch.
+async fn fetch_image_attachments(
+    attachments: &[InboundAttachment],
+) -> Vec<ImageContent> {
+    use base64::Engine;
+
+    let fetcher = frankclaw_media::SafeFetcher::new(MAX_VISION_IMAGE_BYTES);
+    let mut images = Vec::new();
+
+    for attachment in attachments {
+        if !attachment.mime_type.starts_with("image/") {
+            continue;
+        }
+        let Some(url_str) = attachment.url.as_deref() else {
+            continue;
+        };
+        let Ok(url) = url::Url::parse(url_str) else {
+            tracing::warn!(url = url_str, "invalid attachment URL, skipping");
+            continue;
+        };
+
+        match fetcher.fetch(&url).await {
+            Ok(fetched) => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&fetched.bytes);
+                // Use the fetched content-type if it's an image, otherwise fall back
+                // to the attachment's declared MIME type.
+                let mime = if fetched.content_type.starts_with("image/") {
+                    fetched.content_type
+                } else {
+                    attachment.mime_type.clone()
+                };
+                images.push(ImageContent {
+                    mime_type: mime,
+                    data: b64,
+                });
+            }
+            Err(err) => {
+                tracing::warn!(
+                    url = url_str,
+                    error = %err,
+                    "failed to fetch image attachment for vision, skipping"
+                );
+            }
+        }
+    }
+
+    images
 }
 
 fn parse_tool_arguments(tool_call: &ToolCallResponse) -> Result<serde_json::Value> {

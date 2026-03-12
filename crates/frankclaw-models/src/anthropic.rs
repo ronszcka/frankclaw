@@ -197,6 +197,26 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
                         "content": msg.content,
                     }],
                 })
+            } else if !msg.image_content.is_empty() && msg.role == Role::User {
+                // User message with images — build multimodal content array.
+                let mut content_blocks = vec![serde_json::json!({
+                    "type": "text",
+                    "text": msg.content,
+                })];
+                for img in &msg.image_content {
+                    content_blocks.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.mime_type,
+                            "data": img.data,
+                        }
+                    }));
+                }
+                serde_json::json!({
+                    "role": "user",
+                    "content": content_blocks,
+                })
             } else {
                 serde_json::json!({
                     "role": msg.role,
@@ -718,5 +738,86 @@ mod tests {
         // Temperature preserved as-is (f32 precision)
         assert!(body["temperature"].as_f64().unwrap() > 0.69);
         assert!(body["temperature"].as_f64().unwrap() < 0.71);
+    }
+
+    #[test]
+    fn build_request_body_includes_image_content_anthropic_format() {
+        use frankclaw_core::model::ImageContent;
+        let request = CompletionRequest {
+            model_id: "claude-sonnet-4-6".into(),
+            messages: vec![CompletionMessage::with_images(
+                "What is in this image?",
+                vec![ImageContent {
+                    mime_type: "image/jpeg".into(),
+                    data: "abc123base64".into(),
+                }],
+            )],
+            max_tokens: Some(4096),
+            temperature: None,
+            system: None,
+            tools: vec![],
+            thinking_budget: None,
+        };
+        let body = build_request_body(&request);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["role"], "user");
+        let content = msg["content"].as_array().expect("content should be array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "What is in this image?");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(content[1]["source"]["data"], "abc123base64");
+    }
+
+    #[test]
+    fn build_request_body_multiple_images_anthropic() {
+        use frankclaw_core::model::ImageContent;
+        let request = CompletionRequest {
+            model_id: "claude-sonnet-4-6".into(),
+            messages: vec![CompletionMessage::with_images(
+                "Compare",
+                vec![
+                    ImageContent {
+                        mime_type: "image/png".into(),
+                        data: "img1".into(),
+                    },
+                    ImageContent {
+                        mime_type: "image/webp".into(),
+                        data: "img2".into(),
+                    },
+                ],
+            )],
+            max_tokens: Some(4096),
+            temperature: None,
+            system: None,
+            tools: vec![],
+            thinking_budget: None,
+        };
+        let body = build_request_body(&request);
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(content.len(), 3); // 1 text + 2 images
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[2]["source"]["media_type"], "image/webp");
+    }
+
+    #[test]
+    fn build_request_body_text_only_when_no_images_anthropic() {
+        let request = CompletionRequest {
+            model_id: "claude-sonnet-4-6".into(),
+            messages: vec![CompletionMessage::text(Role::User, "hello")],
+            max_tokens: Some(4096),
+            temperature: None,
+            system: None,
+            tools: vec![],
+            thinking_budget: None,
+        };
+        let body = build_request_body(&request);
+        let msg = &body["messages"][0];
+        // Should be plain text string, not content array
+        assert_eq!(msg["content"], "hello");
     }
 }

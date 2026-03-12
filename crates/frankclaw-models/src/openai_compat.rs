@@ -65,6 +65,24 @@ pub(crate) fn build_request_body(request: &CompletionRequest) -> serde_json::Val
                     "tool_call_id": msg.tool_call_id.as_deref().unwrap_or("unknown"),
                     "content": msg.content,
                 }));
+            } else if !msg.image_content.is_empty() && msg.role == Role::User {
+                // User message with images — build multimodal content array.
+                let mut content_parts = vec![serde_json::json!({
+                    "type": "text",
+                    "text": msg.content,
+                })];
+                for img in &msg.image_content {
+                    content_parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", img.mime_type, img.data),
+                        }
+                    }));
+                }
+                msgs.push(serde_json::json!({
+                    "role": "user",
+                    "content": content_parts,
+                }));
             } else {
                 msgs.push(serde_json::json!({
                     "role": msg.role,
@@ -400,5 +418,87 @@ mod tests {
         assert!(deltas.is_empty());
         assert_eq!(state.usage.input_tokens, 10);
         assert_eq!(state.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn build_request_body_includes_image_content() {
+        use frankclaw_core::model::ImageContent;
+        let request = CompletionRequest {
+            model_id: "gpt-4o".into(),
+            messages: vec![CompletionMessage::with_images(
+                "What is in this image?",
+                vec![ImageContent {
+                    mime_type: "image/jpeg".into(),
+                    data: "abc123base64".into(),
+                }],
+            )],
+            max_tokens: Some(1024),
+            temperature: None,
+            system: None,
+            tools: vec![],
+            thinking_budget: None,
+        };
+        let body = build_request_body(&request);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["role"], "user");
+        let content = msg["content"].as_array().expect("content should be array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "What is in this image?");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,abc123base64"
+        );
+    }
+
+    #[test]
+    fn build_request_body_text_only_when_no_images() {
+        let request = CompletionRequest {
+            model_id: "gpt-4o".into(),
+            messages: vec![CompletionMessage::text(Role::User, "hello")],
+            max_tokens: Some(1024),
+            temperature: None,
+            system: None,
+            tools: vec![],
+            thinking_budget: None,
+        };
+        let body = build_request_body(&request);
+        let msg = &body["messages"][0];
+        // Should be plain text string, not content array
+        assert_eq!(msg["content"], "hello");
+    }
+
+    #[test]
+    fn build_request_body_multiple_images() {
+        use frankclaw_core::model::ImageContent;
+        let request = CompletionRequest {
+            model_id: "gpt-4o".into(),
+            messages: vec![CompletionMessage::with_images(
+                "Compare these images",
+                vec![
+                    ImageContent {
+                        mime_type: "image/png".into(),
+                        data: "img1data".into(),
+                    },
+                    ImageContent {
+                        mime_type: "image/jpeg".into(),
+                        data: "img2data".into(),
+                    },
+                ],
+            )],
+            max_tokens: None,
+            temperature: None,
+            system: None,
+            tools: vec![],
+            thinking_budget: None,
+        };
+        let body = build_request_body(&request);
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(content.len(), 3); // 1 text + 2 images
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,img1data");
+        assert_eq!(content[2]["image_url"]["url"], "data:image/jpeg;base64,img2data");
     }
 }
