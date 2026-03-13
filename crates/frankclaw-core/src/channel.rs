@@ -188,6 +188,18 @@ pub trait ChannelPlugin: Send + Sync + 'static {
         })
     }
 
+    /// Send a typing indicator (if supported).
+    /// This tells the platform the bot is "typing" a response.
+    async fn send_typing_indicator(
+        &self,
+        _account_id: &str,
+        _to: &str,
+        _thread_id: Option<&str>,
+    ) -> Result<()> {
+        // Default: silently succeed (not all channels support typing).
+        Ok(())
+    }
+
     /// Send an emoji reaction to a message (if supported).
     async fn send_reaction(
         &self,

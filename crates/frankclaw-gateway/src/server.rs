@@ -1240,6 +1240,17 @@ async fn process_inbound_message_with_target(
         None
     };
 
+    // Send typing indicator to the channel before starting the model call.
+    if let Some(ref channel) = channel_for_stream {
+        let _ = channel
+            .send_typing_indicator(
+                &inbound.account_id,
+                &inbound.sender_id,
+                inbound.thread_id.as_deref(),
+            )
+            .await;
+    }
+
     let response = state
         .runtime
         .chat(frankclaw_runtime::ChatRequest {
