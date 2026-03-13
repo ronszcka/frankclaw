@@ -5,6 +5,7 @@ pub mod auth;
 pub mod broadcast;
 pub mod canvas;
 pub mod delivery;
+pub mod health_monitor;
 pub mod methods;
 pub mod openai_api;
 pub mod pairing;

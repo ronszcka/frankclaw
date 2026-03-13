@@ -60,6 +60,7 @@ pub async fn run(
     start_config_watcher(state.clone(), config_path);
     start_channel_runtime(state.clone());
     start_session_maintenance(state.clone());
+    crate::health_monitor::start_health_monitor(state.clone());
     start_cron_runtime(state.clone(), cron).await?;
 
     let app = build_router(state.clone(), rate_limiter);

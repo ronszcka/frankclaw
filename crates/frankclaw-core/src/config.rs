@@ -169,6 +169,9 @@ pub struct GatewayConfig {
     pub max_ws_message_bytes: usize,
     /// Maximum concurrent WebSocket connections.
     pub max_connections: usize,
+    /// Channel health check interval in seconds. 0 disables monitoring.
+    /// Default: 300 (5 minutes).
+    pub health_check_interval_secs: Option<u64>,
 }
 
 impl Default for GatewayConfig {
@@ -181,6 +184,7 @@ impl Default for GatewayConfig {
             tls: None,
             max_ws_message_bytes: 4 * 1024 * 1024, // 4 MB
             max_connections: 64,
+            health_check_interval_secs: None,
         }
     }
 }
