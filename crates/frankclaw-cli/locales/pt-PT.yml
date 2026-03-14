@@ -281,3 +281,16 @@ warn.no_channels: nenhum canal configurado
 warn.no_providers: nenhum fornecedor de modelos configurado
 warn.state_missing: "o directório de estado '%{path}' ainda não existe"
 warn.whatsapp_no_secret: o canal whatsapp não tem app_secret configurado; as assinaturas de webhook de entrada não serão verificadas
+audit.secrets.ref_shadowed: "O canal '%{channel}' tem tanto '%{inline_key}' como '%{env_key}' — o valor inline sobrepõe a referência de ambiente"
+audit.secrets.ref_shadowed_fix: "Remova o campo inline '%{inline_key}' e mantenha apenas a referência de ambiente"
+audit.secrets.plaintext_env: "O ficheiro '%{file}' contém segredo em texto simples para %{key}"
+audit.secrets.plaintext_env_fix: "Mova os segredos do ficheiro '%{file}' para um gestor de segredos ou cofre encriptado"
+audit.secrets.legacy_file: "Ficheiro de credenciais legado encontrado: %{file}"
+audit.secrets.legacy_file_fix: Elimine o ficheiro legado e utilize referências a variáveis de ambiente
+login.copilot.starting: A iniciar a autenticação do GitHub Copilot...
+login.copilot.open_url: "Abra este URL no seu navegador: %{url}"
+login.copilot.enter_code: "Introduza este código: %{code}"
+login.copilot.waiting: A aguardar autorização...
+login.copilot.success: "Token do GitHub Copilot guardado em: %{path}"
+login.copilot.next_steps: "Adicione à sua configuração: { \"id\": \"copilot\", \"api\": \"github-copilot\", \"models\": [\"gpt-4o\"] }"
+login.unsupported: "Fornecedor de login não suportado '%{provider}'. Suportados: github-copilot"

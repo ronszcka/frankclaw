@@ -1236,6 +1236,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "dirs",
  "frankclaw-core",
  "frankclaw-media",
  "frankclaw-models",

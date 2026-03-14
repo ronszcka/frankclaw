@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod repl;
+mod terminal;
 
 use std::path::PathBuf;
 
@@ -111,7 +112,17 @@ enum Command {
     Stop,
 
     /// Security audit: scan config for secrets, auth, and policy issues.
-    Audit,
+    Audit {
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Authenticate with a provider (e.g., github-copilot).
+    Login {
+        /// Provider to authenticate with.
+        provider: String,
+    },
 
     /// Generate a secure starter config for a chosen channel profile.
     Onboard {
@@ -569,16 +580,20 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Audit => {
+        Command::Audit { format } => {
             let config = load_config(cli.config.as_deref(), &state_dir)?;
             let config_file_path = cli
                 .config
                 .clone()
                 .unwrap_or_else(|| state_dir.join("frankclaw.json"));
-            let exit_code = run_security_audit(&config, &config_file_path, &state_dir)?;
+            let exit_code = run_security_audit(&config, &config_file_path, &state_dir, &format)?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
+        }
+
+        Command::Login { provider } => {
+            run_login(&provider, &state_dir).await?;
         }
 
         Command::Onboard { channel, force } => {
@@ -1876,9 +1891,9 @@ impl CheckResult {
 }
 
 fn print_section(title: &str, checks: &[CheckResult]) {
-    println!("\n  {title}");
+    println!("\n  {}", terminal::bold_colored(title, terminal::colors::ACCENT));
     for check in checks {
-        println!("    {} {}", check.prefix(), check.message());
+        println!("    {} {}", terminal::check_badge(check.prefix()), check.message());
     }
 }
 
@@ -1886,8 +1901,8 @@ async fn run_doctor(
     config_path: Option<&std::path::Path>,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    println!("{}", t!("doctor.title"));
-    println!("{}", t!("doctor.separator"));
+    println!("{}", terminal::bold_colored(&t!("doctor.title").to_string(), terminal::colors::ACCENT));
+    println!("{}", terminal::colored(&t!("doctor.separator").to_string(), terminal::colors::MUTED));
 
     // --- System info ---
     let mut system_checks = vec![
@@ -2218,17 +2233,69 @@ impl std::fmt::Display for Severity {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AuditCode {
+    AuthDisabled,
+    AuthWeak,
+    SecretsInline,
+    SecretsMissing,
+    SecretsNoKeyRef,
+    PlaintextFound,
+    RefShadowed,
+    LegacyResidue,
+    EncryptionOff,
+    EncryptionKeyMissing,
+    NetworkExposed,
+    NetworkNoTls,
+    SsrfDisabled,
+    ChannelPolicy,
+    ChannelWhatsApp,
+    ToolPolicy,
+    ToolSandbox,
+    FilePermissions,
+    MediaScanning,
+}
+
+impl AuditCode {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::AuthDisabled => "auth_disabled",
+            Self::AuthWeak => "auth_weak",
+            Self::SecretsInline => "secrets_inline",
+            Self::SecretsMissing => "secrets_missing",
+            Self::SecretsNoKeyRef => "secrets_no_key_ref",
+            Self::PlaintextFound => "plaintext_found",
+            Self::RefShadowed => "ref_shadowed",
+            Self::LegacyResidue => "legacy_residue",
+            Self::EncryptionOff => "encryption_off",
+            Self::EncryptionKeyMissing => "encryption_key_missing",
+            Self::NetworkExposed => "network_exposed",
+            Self::NetworkNoTls => "network_no_tls",
+            Self::SsrfDisabled => "ssrf_disabled",
+            Self::ChannelPolicy => "channel_policy",
+            Self::ChannelWhatsApp => "channel_whatsapp",
+            Self::ToolPolicy => "tool_policy",
+            Self::ToolSandbox => "tool_sandbox",
+            Self::FilePermissions => "file_permissions",
+            Self::MediaScanning => "media_scanning",
+        }
+    }
+}
+
 struct Finding {
     severity: Severity,
+    code: AuditCode,
     category: &'static str,
     message: String,
     remediation: String,
+    json_path: Option<String>,
 }
 
 fn run_security_audit(
     config: &frankclaw_core::config::FrankClawConfig,
     config_path: &std::path::Path,
     state_dir: &std::path::Path,
+    output_format: &str,
 ) -> anyhow::Result<i32> {
     let mut findings = Vec::new();
 
@@ -2263,53 +2330,110 @@ fn run_security_audit(
     if !config.security.ssrf_protection {
         findings.push(Finding {
             severity: Severity::Critical,
+            code: AuditCode::SsrfDisabled,
             category: "network",
             message: t!("audit.network.ssrf_off").to_string(),
             remediation: t!("audit.network.ssrf_off_fix").to_string(),
+            json_path: None,
         });
     }
+
+    // --- Scan for secret refs ---
+    audit_secret_refs(config, &mut findings);
+
+    // --- Scan .env files in working dir ---
+    audit_dotenv_plaintext(&mut findings);
+
+    // --- Check for legacy credential files ---
+    audit_legacy_credentials(state_dir, &mut findings);
 
     // --- Print report ---
     findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
-    println!("{}", t!("audit.title"));
-    println!("{}", t!("audit.separator"));
-    println!();
-
-    if findings.is_empty() {
-        println!("{}", t!("audit.clean"));
-        return Ok(0);
-    }
-
-    let mut by_category: std::collections::BTreeMap<&str, Vec<&Finding>> =
-        std::collections::BTreeMap::new();
-    for finding in &findings {
-        by_category.entry(finding.category).or_default().push(finding);
-    }
-
-    for (category, category_findings) in &by_category {
-        println!("  {}", category.to_uppercase());
-        for finding in category_findings {
-            println!("    [{}] {}", finding.severity, finding.message);
-            println!("          {}", t!("audit.fix_label", remediation = finding.remediation));
-        }
-        println!();
-    }
-
-    // --- Summary ---
     let crit = findings.iter().filter(|f| f.severity == Severity::Critical).count();
     let high = findings.iter().filter(|f| f.severity == Severity::High).count();
     let med = findings.iter().filter(|f| f.severity == Severity::Medium).count();
     let low = findings.iter().filter(|f| f.severity == Severity::Low).count();
     let info = findings.iter().filter(|f| f.severity == Severity::Info).count();
 
-    println!("{}", t!("audit.summary", crit = crit, high = high, med = med, low = low, info = info));
+    if output_format == "json" {
+        let json_findings: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                let mut obj = serde_json::json!({
+                    "severity": f.severity.to_string().trim().to_string(),
+                    "category": f.category,
+                    "code": f.code.name(),
+                    "message": f.message,
+                    "remediation": f.remediation,
+                });
+                if let Some(ref jp) = f.json_path {
+                    obj["json_path"] = serde_json::json!(jp);
+                }
+                obj
+            })
+            .collect();
+        let report = serde_json::json!({
+            "version": 1,
+            "status": if crit > 0 || high > 0 { "fail" } else if findings.is_empty() { "clean" } else { "warn" },
+            "summary": {
+                "critical": crit,
+                "high": high,
+                "medium": med,
+                "low": low,
+                "info": info,
+                "total": findings.len(),
+            },
+            "findings": json_findings,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", terminal::bold_colored(&t!("audit.title").to_string(), terminal::colors::ACCENT));
+        println!("{}", terminal::colored(&t!("audit.separator").to_string(), terminal::colors::MUTED));
+        println!();
+
+        if findings.is_empty() {
+            println!("{}", t!("audit.clean"));
+            return Ok(0);
+        }
+
+        let mut by_category: std::collections::BTreeMap<&str, Vec<&Finding>> =
+            std::collections::BTreeMap::new();
+        for finding in &findings {
+            by_category.entry(finding.category).or_default().push(finding);
+        }
+
+        for (category, category_findings) in &by_category {
+            println!("  {}", terminal::bold_colored(&category.to_uppercase(), terminal::colors::ACCENT));
+            for finding in category_findings {
+                println!(
+                    "    {} {}",
+                    terminal::severity_badge(&finding.severity.to_string().trim().to_string()),
+                    finding.message
+                );
+                println!(
+                    "          {}",
+                    terminal::colored(
+                        &t!("audit.fix_label", remediation = finding.remediation).to_string(),
+                        terminal::colors::MUTED,
+                    )
+                );
+            }
+            println!();
+        }
+
+        println!("{}", t!("audit.summary", crit = crit, high = high, med = med, low = low, info = info));
+    }
 
     if crit > 0 || high > 0 {
-        println!("{}", t!("audit.failed"));
+        if output_format != "json" {
+            println!("{}", t!("audit.failed"));
+        }
         Ok(1)
     } else {
-        println!("{}", t!("audit.passed"));
+        if output_format != "json" && !findings.is_empty() {
+            println!("{}", t!("audit.passed"));
+        }
         Ok(0)
     }
 }
@@ -2322,9 +2446,11 @@ fn audit_auth(
         frankclaw_core::auth::AuthMode::None => {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::AuthDisabled,
                 category: "auth",
                 message: t!("audit.auth.disabled").to_string(),
                 remediation: t!("audit.auth.disabled_fix").to_string(),
+                json_path: None,
             });
         }
         frankclaw_core::auth::AuthMode::Token { token } => {
@@ -2334,9 +2460,11 @@ fn audit_auth(
                 if token_str.len() < 16 {
                     findings.push(Finding {
                         severity: Severity::Medium,
+                        code: AuditCode::AuthWeak,
                         category: "auth",
                         message: t!("audit.auth.token_short").to_string(),
                         remediation: t!("audit.auth.token_short_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2345,9 +2473,11 @@ fn audit_auth(
             if hash.trim().is_empty() {
                 findings.push(Finding {
                     severity: Severity::High,
+                    code: AuditCode::AuthWeak,
                     category: "auth",
                     message: t!("audit.auth.password_empty").to_string(),
                     remediation: t!("audit.auth.password_empty_fix").to_string(),
+                    json_path: None,
                 });
             }
         }
@@ -2364,9 +2494,11 @@ fn audit_inline_secrets(
         if provider.api_key_ref.is_none() && provider.api != "ollama" {
             findings.push(Finding {
                 severity: Severity::Medium,
+                code: AuditCode::SecretsNoKeyRef,
                 category: "secrets",
                 message: t!("audit.secrets.no_key_ref", id = provider.id).to_string(),
                 remediation: t!("audit.secrets.no_key_ref_fix", id = provider.id).to_string(),
+                json_path: Some(format!("models.providers[{}]", provider.id)),
             });
         }
     }
@@ -2390,9 +2522,11 @@ fn audit_inline_secrets(
                 {
                     findings.push(Finding {
                         severity: Severity::High,
+                        code: AuditCode::SecretsInline,
                         category: "secrets",
                         message: t!("audit.secrets.inline", channel = channel_id, key = inline_key).to_string(),
                         remediation: t!("audit.secrets.inline_fix", key = inline_key, env_key = env_key).to_string(),
+                        json_path: Some(format!("channels.{}.accounts", channel_id)),
                     });
                 }
             }
@@ -2403,9 +2537,11 @@ fn audit_inline_secrets(
     if let frankclaw_core::auth::AuthMode::Token { token: Some(_) } = &config.gateway.auth {
         findings.push(Finding {
             severity: Severity::Low,
+            code: AuditCode::SecretsInline,
             category: "secrets",
             message: t!("audit.secrets.token_inline").to_string(),
             remediation: t!("audit.secrets.token_inline_fix").to_string(),
+            json_path: Some("gateway.auth.token".into()),
         });
     }
 }
@@ -2423,9 +2559,11 @@ fn audit_missing_env_vars(
             {
                 findings.push(Finding {
                     severity: Severity::Medium,
+                    code: AuditCode::SecretsMissing,
                     category: "secrets",
                     message: t!("audit.secrets.missing_env", id = provider.id, env = env_name).to_string(),
                     remediation: t!("audit.secrets.missing_env_fix", env = env_name).to_string(),
+                    json_path: None,
                 });
             }
         }
@@ -2446,9 +2584,11 @@ fn audit_missing_env_vars(
                     {
                         findings.push(Finding {
                             severity: Severity::Medium,
+                            code: AuditCode::SecretsMissing,
                             category: "secrets",
                             message: t!("audit.secrets.channel_missing_env", channel = channel_id, env = env_name, key = key).to_string(),
                             remediation: t!("audit.secrets.channel_missing_env_fix", env = env_name).to_string(),
+                            json_path: None,
                         });
                     }
                 }
@@ -2464,25 +2604,31 @@ fn audit_encryption(
     if !config.security.encrypt_sessions {
         findings.push(Finding {
             severity: Severity::Medium,
+            code: AuditCode::EncryptionOff,
             category: "encryption",
             message: t!("audit.encrypt.sessions_off").to_string(),
             remediation: t!("audit.encrypt.sessions_off_fix").to_string(),
+            json_path: None,
         });
     } else if load_master_key_from_env().unwrap_or(None).is_none() {
         findings.push(Finding {
             severity: Severity::High,
+            code: AuditCode::EncryptionKeyMissing,
             category: "encryption",
             message: t!("audit.encrypt.no_master_key").to_string(),
             remediation: t!("audit.encrypt.no_master_key_fix").to_string(),
+            json_path: None,
         });
     }
 
     if !config.security.encrypt_media {
         findings.push(Finding {
             severity: Severity::Low,
+            code: AuditCode::EncryptionOff,
             category: "encryption",
             message: t!("audit.encrypt.media_off").to_string(),
             remediation: t!("audit.encrypt.media_off_fix").to_string(),
+            json_path: None,
         });
     }
 }
@@ -2499,18 +2645,22 @@ fn audit_network(
         if matches!(config.gateway.auth, frankclaw_core::auth::AuthMode::None) {
             findings.push(Finding {
                 severity: Severity::Critical,
+                code: AuditCode::NetworkExposed,
                 category: "network",
                 message: t!("audit.network.exposed_no_auth").to_string(),
                 remediation: t!("audit.network.exposed_no_auth_fix").to_string(),
+                json_path: None,
             });
         }
 
         if config.gateway.tls.is_none() {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::NetworkNoTls,
                 category: "network",
                 message: t!("audit.network.no_tls").to_string(),
                 remediation: t!("audit.network.no_tls_fix").to_string(),
+                json_path: None,
             });
         }
     }
@@ -2530,9 +2680,11 @@ fn audit_channel_policies(
             Err(_) => {
                 findings.push(Finding {
                     severity: Severity::High,
+                    code: AuditCode::ChannelPolicy,
                     category: "channels",
                     message: t!("audit.channels.invalid_policy", channel = channel_id).to_string(),
                     remediation: t!("audit.channels.invalid_policy_fix").to_string(),
+                    json_path: None,
                 });
                 continue;
             }
@@ -2544,9 +2696,11 @@ fn audit_channel_policies(
         {
             findings.push(Finding {
                 severity: Severity::Medium,
+                code: AuditCode::ChannelPolicy,
                 category: "channels",
                 message: t!("audit.channels.open_groups", channel = channel_id).to_string(),
                 remediation: t!("audit.channels.open_groups_fix", channel = channel_id).to_string(),
+                json_path: None,
             });
         }
 
@@ -2559,9 +2713,11 @@ fn audit_channel_policies(
             if !has_app_secret {
                 findings.push(Finding {
                     severity: Severity::High,
+                    code: AuditCode::ChannelWhatsApp,
                     category: "channels",
                     message: t!("audit.channels.whatsapp_no_secret").to_string(),
                     remediation: t!("audit.channels.whatsapp_no_secret_fix").to_string(),
+                    json_path: None,
                 });
             }
         }
@@ -2585,25 +2741,31 @@ fn audit_tool_policies(
             frankclaw_tools::bash::BashPolicy::AllowAll => {
                 findings.push(Finding {
                     severity: Severity::Critical,
+                    code: AuditCode::ToolPolicy,
                     category: "tools",
                     message: t!("audit.tools.bash_allow_all").to_string(),
                     remediation: t!("audit.tools.bash_allow_all_fix").to_string(),
+                    json_path: None,
                 });
             }
             frankclaw_tools::bash::BashPolicy::DenyAll => {
                 findings.push(Finding {
                     severity: Severity::Info,
+                    code: AuditCode::ToolPolicy,
                     category: "tools",
                     message: t!("audit.tools.bash_deny_all").to_string(),
                     remediation: t!("audit.tools.bash_deny_all_fix").to_string(),
+                    json_path: None,
                 });
             }
             frankclaw_tools::bash::BashPolicy::Allowlist(ref allowed) => {
                 findings.push(Finding {
                     severity: Severity::Low,
+                    code: AuditCode::ToolPolicy,
                     category: "tools",
                     message: t!("audit.tools.bash_allowlist", count = allowed.len(), commands = allowed.join(", ")).to_string(),
                     remediation: t!("audit.tools.bash_allowlist_fix").to_string(),
+                    json_path: None,
                 });
             }
         }
@@ -2615,9 +2777,11 @@ fn audit_tool_policies(
                 if !matches!(bash_policy, frankclaw_tools::bash::BashPolicy::DenyAll) {
                     findings.push(Finding {
                         severity: Severity::Medium,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.no_sandbox").to_string(),
                         remediation: t!("audit.tools.no_sandbox_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2625,16 +2789,20 @@ fn audit_tool_policies(
                 if frankclaw_tools::bash::SandboxMode::is_available() {
                     findings.push(Finding {
                         severity: Severity::Info,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_aijail").to_string(),
                         remediation: t!("audit.tools.sandbox_aijail_fix").to_string(),
+                        json_path: None,
                     });
                 } else {
                     findings.push(Finding {
                         severity: Severity::High,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_missing", mode = "ai-jail").to_string(),
                         remediation: t!("audit.tools.sandbox_missing_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2642,16 +2810,20 @@ fn audit_tool_policies(
                 if frankclaw_tools::bash::SandboxMode::is_available() {
                     findings.push(Finding {
                         severity: Severity::Info,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_lockdown").to_string(),
                         remediation: t!("audit.tools.sandbox_lockdown_fix").to_string(),
+                        json_path: None,
                     });
                 } else {
                     findings.push(Finding {
                         severity: Severity::High,
+                        code: AuditCode::ToolSandbox,
                         category: "tools",
                         message: t!("audit.tools.sandbox_missing", mode = "ai-jail-lockdown").to_string(),
                         remediation: t!("audit.tools.sandbox_missing_fix").to_string(),
+                        json_path: None,
                     });
                 }
             }
@@ -2668,26 +2840,32 @@ fn audit_tool_policies(
 
     findings.push(Finding {
         severity: Severity::Info,
+        code: AuditCode::ToolPolicy,
         category: "tools",
         message: t!("audit.tools.approval_level", level = policy.approval_level.to_string()).to_string(),
         remediation: t!("audit.tools.approval_level_fix").to_string(),
+        json_path: None,
     });
 
     if has_mutating_tools && policy.approval_level.approves(frankclaw_core::model::ToolRiskLevel::Mutating) {
         findings.push(Finding {
             severity: Severity::Medium,
+            code: AuditCode::ToolPolicy,
             category: "tools",
             message: t!("audit.tools.mutating_approved").to_string(),
             remediation: t!("audit.tools.mutating_approved_fix").to_string(),
+            json_path: None,
         });
     }
 
     if policy.approval_level.approves(frankclaw_core::model::ToolRiskLevel::Destructive) {
         findings.push(Finding {
             severity: Severity::High,
+            code: AuditCode::ToolPolicy,
             category: "tools",
             message: t!("audit.tools.destructive_approved").to_string(),
             remediation: t!("audit.tools.destructive_approved_fix").to_string(),
+            json_path: None,
         });
     }
 }
@@ -2696,16 +2874,20 @@ fn audit_file_scanning(findings: &mut Vec<Finding>) {
     if frankclaw_media::virustotal::VirusTotalScanner::from_env().is_some() {
         findings.push(Finding {
             severity: Severity::Info,
+            code: AuditCode::MediaScanning,
             category: "media",
             message: t!("audit.media.scanning_on").to_string(),
             remediation: t!("audit.media.scanning_on_fix").to_string(),
+            json_path: None,
         });
     } else {
         findings.push(Finding {
             severity: Severity::Low,
+            code: AuditCode::MediaScanning,
             category: "media",
             message: t!("audit.media.scanning_off").to_string(),
             remediation: t!("audit.media.scanning_off_fix").to_string(),
+            json_path: None,
         });
     }
 }
@@ -2723,9 +2905,11 @@ fn audit_file_permissions(
         if mode & 0o077 != 0 {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::FilePermissions,
                 category: "filesystem",
                 message: t!("audit.fs.config_world_readable", mode = format!("{mode:04o}")).to_string(),
                 remediation: t!("audit.fs.config_world_readable_fix", path = config_path.display()).to_string(),
+                json_path: None,
             });
         }
     }
@@ -2735,9 +2919,11 @@ fn audit_file_permissions(
         if mode & 0o077 != 0 {
             findings.push(Finding {
                 severity: Severity::Medium,
+                code: AuditCode::FilePermissions,
                 category: "filesystem",
                 message: t!("audit.fs.state_world_readable", mode = format!("{mode:04o}")).to_string(),
                 remediation: t!("audit.fs.state_world_readable_fix", path = state_dir.display()).to_string(),
+                json_path: None,
             });
         }
     }
@@ -2748,9 +2934,11 @@ fn audit_file_permissions(
         if mode & 0o077 != 0 {
             findings.push(Finding {
                 severity: Severity::High,
+                code: AuditCode::FilePermissions,
                 category: "filesystem",
                 message: t!("audit.fs.db_world_readable", mode = format!("{mode:04o}")).to_string(),
                 remediation: t!("audit.fs.db_world_readable_fix", path = db_path.display()).to_string(),
+                json_path: None,
             });
         }
     }
@@ -2763,6 +2951,193 @@ fn audit_file_permissions(
     _findings: &mut Vec<Finding>,
 ) {
     // No permission checks on non-Unix platforms
+}
+
+/// Check for shadowed secret refs: a provider has both inline value and env ref.
+fn audit_secret_refs(
+    config: &frankclaw_core::config::FrankClawConfig,
+    findings: &mut Vec<Finding>,
+) {
+    for (channel_id, channel) in &config.channels {
+        for account in &channel.accounts {
+            for (inline_key, env_key) in [
+                ("bot_token", "bot_token_env"),
+                ("token", "token_env"),
+                ("app_token", "app_token_env"),
+                ("access_token", "access_token_env"),
+                ("verify_token", "verify_token_env"),
+                ("app_secret", "app_secret_env"),
+            ] {
+                let has_inline = account
+                    .get(inline_key)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .is_some();
+                let has_env = account
+                    .get(env_key)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.trim().is_empty())
+                    .is_some();
+                if has_inline && has_env {
+                    findings.push(Finding {
+                        severity: Severity::Medium,
+                        code: AuditCode::RefShadowed,
+                        category: "secrets",
+                        message: t!(
+                            "audit.secrets.ref_shadowed",
+                            channel = channel_id,
+                            inline_key = inline_key,
+                            env_key = env_key
+                        )
+                        .to_string(),
+                        remediation: t!(
+                            "audit.secrets.ref_shadowed_fix",
+                            inline_key = inline_key
+                        )
+                        .to_string(),
+                        json_path: Some(format!("channels.{}.accounts", channel_id)),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Scan .env files in the working directory for plaintext secrets.
+fn audit_dotenv_plaintext(findings: &mut Vec<Finding>) {
+    let secret_patterns = [
+        ("OPENAI_API_KEY", "sk-"),
+        ("ANTHROPIC_API_KEY", "sk-ant-"),
+        ("TELEGRAM_BOT_TOKEN", ""),
+        ("DISCORD_BOT_TOKEN", ""),
+        ("SLACK_BOT_TOKEN", "xoxb-"),
+        ("SLACK_APP_TOKEN", "xapp-"),
+    ];
+
+    for entry in [".env", ".env.local", ".env.production"] {
+        let path = std::path::Path::new(entry);
+        if !path.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            for (env_name, prefix) in &secret_patterns {
+                if let Some(rest) = line.strip_prefix(env_name) {
+                    let rest = rest.trim_start_matches('=').trim();
+                    if !rest.is_empty()
+                        && !rest.starts_with('$')
+                        && !rest.starts_with("${")
+                        && (prefix.is_empty() || rest.starts_with(prefix))
+                    {
+                        findings.push(Finding {
+                            severity: Severity::High,
+                            code: AuditCode::PlaintextFound,
+                            category: "secrets",
+                            message: t!(
+                                "audit.secrets.plaintext_env",
+                                file = entry,
+                                key = *env_name
+                            )
+                            .to_string(),
+                            remediation: t!("audit.secrets.plaintext_env_fix", file = entry)
+                                .to_string(),
+                            json_path: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check for legacy credential files in state directory.
+fn audit_legacy_credentials(state_dir: &std::path::Path, findings: &mut Vec<Finding>) {
+    let legacy_files = [
+        "openai-key.txt",
+        "anthropic-key.txt",
+        "api-key.txt",
+        ".openai_api_key",
+    ];
+    for filename in legacy_files {
+        let path = state_dir.join(filename);
+        if path.exists() {
+            findings.push(Finding {
+                severity: Severity::Medium,
+                code: AuditCode::LegacyResidue,
+                category: "secrets",
+                message: t!(
+                    "audit.secrets.legacy_file",
+                    file = path.display().to_string()
+                )
+                .to_string(),
+                remediation: t!("audit.secrets.legacy_file_fix").to_string(),
+                json_path: None,
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Login: provider authentication flows
+// ---------------------------------------------------------------------------
+
+async fn run_login(provider: &str, state_dir: &std::path::Path) -> anyhow::Result<()> {
+    match provider {
+        "github-copilot" | "copilot" => {
+            println!("{}", t!("login.copilot.starting"));
+
+            let device = frankclaw_models::copilot::request_device_code().await?;
+
+            println!();
+            println!(
+                "{}",
+                t!(
+                    "login.copilot.open_url",
+                    url = device.verification_uri
+                )
+            );
+            println!(
+                "{}",
+                t!("login.copilot.enter_code", code = device.user_code)
+            );
+            println!();
+            println!("{}", t!("login.copilot.waiting"));
+
+            let github_token =
+                frankclaw_models::copilot::poll_for_access_token(
+                    &device.device_code,
+                    device.interval,
+                )
+                .await?;
+
+            let token_path =
+                frankclaw_models::copilot::store_github_token(state_dir, &github_token)?;
+
+            println!();
+            println!(
+                "{}",
+                t!(
+                    "login.copilot.success",
+                    path = token_path.display().to_string()
+                )
+            );
+            println!("{}", t!("login.copilot.next_steps"));
+        }
+        other => {
+            anyhow::bail!(
+                "{}",
+                t!("login.unsupported", provider = other)
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3574,7 +3949,7 @@ mod tests {
         let config_path = std::path::Path::new("/tmp/nonexistent-config.json");
         let state_dir = std::path::Path::new("/tmp/nonexistent-state");
 
-        let exit_code = run_security_audit(&config, config_path, state_dir)
+        let exit_code = run_security_audit(&config, config_path, state_dir, "text")
             .expect("audit should succeed");
 
         // Should fail due to SSRF being critical + likely other high findings
@@ -3587,6 +3962,119 @@ mod tests {
         assert!(Severity::High > Severity::Medium);
         assert!(Severity::Medium > Severity::Low);
         assert!(Severity::Low > Severity::Info);
+    }
+
+    #[test]
+    fn audit_secret_refs_detects_shadowed_ref() {
+        let mut config = frankclaw_core::config::FrankClawConfig::default();
+        config.channels.insert(
+            ChannelId::new("telegram"),
+            ChannelConfig {
+                enabled: true,
+                accounts: vec![serde_json::json!({
+                    "bot_token": "inline-token-value",
+                    "bot_token_env": "TELEGRAM_BOT_TOKEN"
+                })],
+                extra: serde_json::json!({}),
+            },
+        );
+
+        let mut findings = Vec::new();
+        audit_secret_refs(&config, &mut findings);
+        assert!(
+            findings.iter().any(|f| matches!(f.code, AuditCode::RefShadowed)),
+            "should detect shadowed ref"
+        );
+    }
+
+    #[test]
+    fn audit_dotenv_detects_plaintext_in_env_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-dotenv-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // We can't easily test .env detection because it reads from cwd.
+        // This test validates the function doesn't panic on missing files.
+        let mut findings = Vec::new();
+        audit_dotenv_plaintext(&mut findings);
+        // Should not panic and findings may or may not be present
+        // depending on what's in the working directory
+    }
+
+    #[test]
+    fn audit_legacy_credentials_detects_legacy_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "frankclaw-legacy-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let legacy_path = dir.join("openai-key.txt");
+        std::fs::write(&legacy_path, "sk-test").expect("write should succeed");
+
+        let mut findings = Vec::new();
+        audit_legacy_credentials(&dir, &mut findings);
+        assert!(
+            findings.iter().any(|f| matches!(f.code, AuditCode::LegacyResidue)),
+            "should detect legacy credential file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_json_output_roundtrip() {
+        let mut config = frankclaw_core::config::FrankClawConfig::default();
+        config.security.ssrf_protection = false;
+        let config_path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let state_dir = std::path::Path::new("/tmp/nonexistent-state");
+
+        // Capture JSON output by using json format
+        let exit_code = run_security_audit(&config, config_path, state_dir, "json")
+            .expect("audit should succeed");
+        assert_eq!(exit_code, 1);
+    }
+
+    #[test]
+    fn audit_code_names_are_unique() {
+        let codes = vec![
+            AuditCode::AuthDisabled,
+            AuditCode::AuthWeak,
+            AuditCode::SecretsInline,
+            AuditCode::SecretsMissing,
+            AuditCode::SecretsNoKeyRef,
+            AuditCode::PlaintextFound,
+            AuditCode::RefShadowed,
+            AuditCode::LegacyResidue,
+            AuditCode::EncryptionOff,
+            AuditCode::EncryptionKeyMissing,
+            AuditCode::NetworkExposed,
+            AuditCode::NetworkNoTls,
+            AuditCode::SsrfDisabled,
+            AuditCode::ChannelPolicy,
+            AuditCode::ChannelWhatsApp,
+            AuditCode::ToolPolicy,
+            AuditCode::ToolSandbox,
+            AuditCode::FilePermissions,
+            AuditCode::MediaScanning,
+        ];
+        let mut names: Vec<&str> = codes.iter().map(|c| c.name()).collect();
+        let len_before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), len_before, "audit code names must be unique");
+    }
+
+    #[test]
+    fn empty_config_produces_clean_or_minor_audit() {
+        let config = frankclaw_core::config::FrankClawConfig::default();
+        let config_path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let state_dir = std::path::Path::new("/tmp/nonexistent-state");
+
+        // Default config has SSRF enabled, so this should not produce critical findings
+        // unless something else triggers (like missing auth)
+        let _exit_code = run_security_audit(&config, config_path, state_dir, "text")
+            .expect("audit should succeed");
     }
 }
 

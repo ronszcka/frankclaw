@@ -23,7 +23,8 @@ use frankclaw_core::model::{
 use frankclaw_core::session::{SessionEntry, SessionStore, TranscriptEntry};
 use frankclaw_core::types::{AgentId, ChannelId, Role, SessionKey};
 use frankclaw_models::{
-    AnthropicProvider, FailoverChain, OllamaProvider, OpenAiProvider, ProviderHealth,
+    AnthropicProvider, CopilotProvider, FailoverChain, OllamaProvider, OpenAiProvider,
+    ProviderHealth,
 };
 use frankclaw_plugin_sdk::{SkillManifest, load_workspace_skills};
 use frankclaw_tools::{ToolContext, ToolOutput, ToolRegistry};
@@ -1940,11 +1941,24 @@ fn build_providers(
                     resolve_secret(provider, "DEEPSEEK_API_KEY")?,
                     provider.models.clone(),
                 )),
+                "github-copilot" | "copilot" => {
+                    let state_dir = dirs::data_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join("frankclaw");
+                    let github_token =
+                        frankclaw_models::copilot::load_github_token(&state_dir)?;
+                    Arc::new(CopilotProvider::new(
+                        provider.id.clone(),
+                        github_token,
+                        &state_dir,
+                        provider.models.clone(),
+                    ))
+                }
                 other => {
                     return Err(FrankClawError::ConfigValidation {
                         msg: format!(
                             "unsupported model provider api '{}'; expected openai, anthropic, ollama, \
-                             google, openrouter, groq, together, or deepseek",
+                             google, openrouter, groq, together, deepseek, or github-copilot",
                             other
                         ),
                     });

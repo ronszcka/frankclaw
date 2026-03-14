@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod aria;
 pub mod audio;
 pub mod bash;
 pub mod config_tools;
@@ -142,6 +143,8 @@ impl ToolRegistry {
         registry.register(Arc::new(BrowserWaitTool::new(browser.clone())));
         registry.register(Arc::new(BrowserPressTool::new(browser.clone())));
         registry.register(Arc::new(BrowserSessionsTool::new(browser.clone())));
+        registry.register(Arc::new(BrowserScreenshotTool::new(browser.clone())));
+        registry.register(Arc::new(BrowserAriaSnapshotTool::new(browser.clone())));
         registry.register(Arc::new(BrowserCloseTool::new(browser)));
         registry.register(Arc::new(bash::BashTool::from_env()));
         // Web tools
@@ -656,6 +659,92 @@ impl BrowserClient {
         }
     }
 
+    async fn screenshot(&self, session_id: &str, full_page: bool) -> Result<Vec<u8>> {
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: format!("browser session '{}' was not opened yet", session_id),
+            })?;
+        let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
+        self.wait_for_ready(&mut socket).await?;
+
+        let mut params = serde_json::json!({
+            "format": "png",
+            "fromSurface": true,
+        });
+
+        if full_page {
+            let metrics = self
+                .send_command(&mut socket, "Page.getLayoutMetrics", serde_json::json!({}))
+                .await?;
+            let content_size = &metrics["result"]["contentSize"];
+            let width = content_size["width"].as_f64().unwrap_or(1280.0);
+            let height = content_size["height"].as_f64().unwrap_or(800.0);
+            params["clip"] = serde_json::json!({
+                "x": 0,
+                "y": 0,
+                "width": width,
+                "height": height,
+                "scale": 1,
+            });
+        }
+
+        let response = self
+            .send_command(&mut socket, "Page.captureScreenshot", params)
+            .await?;
+        let b64_data = response["result"]["data"]
+            .as_str()
+            .ok_or_else(|| FrankClawError::AgentRuntime {
+                msg: "screenshot response missing base64 data".into(),
+            })?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64_data)
+            .map_err(|e| FrankClawError::AgentRuntime {
+                msg: format!("failed to decode screenshot: {e}"),
+            })
+    }
+
+    async fn aria_snapshot(
+        &self,
+        session_id: &str,
+        options: &aria::AriaSnapshotOptions,
+    ) -> Result<(String, aria::RoleRefMap)> {
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| FrankClawError::InvalidRequest {
+                msg: format!("browser session '{}' was not opened yet", session_id),
+            })?;
+        let mut socket = self.connect_page_socket(&session.page_ws_url).await?;
+        self.wait_for_ready(&mut socket).await?;
+
+        // Enable accessibility domain
+        let _ = self
+            .send_command(&mut socket, "Accessibility.enable", serde_json::json!({}))
+            .await?;
+
+        // Get full accessibility tree
+        let response = self
+            .send_command(&mut socket, "Accessibility.getFullAXTree", serde_json::json!({}))
+            .await?;
+
+        let nodes = response["result"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let (tree, refs) = aria::build_role_snapshot(&nodes, options);
+        Ok((tree, refs))
+    }
+
     async fn press_key(&self, session_id: &str, selector: &str, key: &str) -> Result<BrowserSnapshot> {
         validate_press_key(key)?;
         let session = self
@@ -940,6 +1029,12 @@ struct BrowserSessionsTool {
 struct BrowserCloseTool {
     client: Arc<BrowserClient>,
 }
+struct BrowserScreenshotTool {
+    client: Arc<BrowserClient>,
+}
+struct BrowserAriaSnapshotTool {
+    client: Arc<BrowserClient>,
+}
 
 impl BrowserOpenTool {
     fn new(client: Arc<BrowserClient>) -> Self {
@@ -990,6 +1085,18 @@ impl BrowserSessionsTool {
 }
 
 impl BrowserCloseTool {
+    fn new(client: Arc<BrowserClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl BrowserScreenshotTool {
+    fn new(client: Arc<BrowserClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl BrowserAriaSnapshotTool {
     fn new(client: Arc<BrowserClient>) -> Self {
         Self { client }
     }
@@ -1549,6 +1656,89 @@ impl Tool for BrowserCloseTool {
         Ok(serde_json::json!({
             "session_id": session_id,
             "closed": true,
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for BrowserScreenshotTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "browser.screenshot".into(),
+            description: "Capture a PNG screenshot of an existing Chromium-backed browser session. Returns base64-encoded PNG data.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional browser session identifier. Defaults to the current chat session." },
+                    "full_page": { "type": "boolean", "description": "Capture entire page content (not just viewport). Default: false." }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let session_id = self
+            .client
+            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let full_page = args
+            .get("full_page")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let png_bytes = self.client.screenshot(&session_id, full_page).await?;
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "format": "png",
+            "size_bytes": png_bytes.len(),
+            "_image_content": [{
+                "mime_type": "image/png",
+                "data": b64,
+            }],
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for BrowserAriaSnapshotTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "browser.aria_snapshot".into(),
+            description: "Get an accessibility (ARIA) tree snapshot of an existing Chromium-backed browser session. Returns an indented text representation of interactive and content elements with [ref=eN] annotations for element targeting.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional browser session identifier. Defaults to the current chat session." },
+                    "interactive_only": { "type": "boolean", "description": "Only include interactive elements (buttons, links, inputs). Default: false." },
+                    "max_depth": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum tree depth to traverse. Default: 20." }
+                }
+            }),
+            risk_level: ToolRiskLevel::ReadOnly,
+        }
+    }
+
+    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) -> Result<serde_json::Value> {
+        let session_id = self
+            .client
+            .resolve_session_id(args.get("session_id").and_then(|value| value.as_str()), &ctx)?;
+        let options = aria::AriaSnapshotOptions {
+            interactive_only: args
+                .get("interactive_only")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            max_depth: args
+                .get("max_depth")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(20)
+                .clamp(1, 50) as usize,
+        };
+        let (tree, refs) = self.client.aria_snapshot(&session_id, &options).await?;
+        let ref_count = refs.len();
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "tree": tree,
+            "ref_count": ref_count,
         }))
     }
 }
