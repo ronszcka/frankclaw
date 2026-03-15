@@ -64,13 +64,13 @@ Last updated: 2026-03-14
 
 ## Tier 3: Partial / Mostly Covered — Gaps Only
 
-### Wizard / Onboarding (`openclaw/src/wizard/`)
+### ~~Wizard / Onboarding~~ (`openclaw/src/wizard/`) — **Not Needed**
 - Guided interactive onboarding flow
 - Secret input collection (API keys, tokens)
 - Gateway config prompts (port, auth, bind address)
 - Risk acknowledgment and security guidance
 - Config finalization and saving
-- **FrankClaw status:** Has `setup` command with provider selection and key input. Missing: guided gateway config prompts, risk acknowledgment flow.
+- **FrankClaw status:** `frankclaw setup` covers the critical path (provider selection, API key config, channel selection, port, encryption). Gateway config prompts and risk acknowledgment are unnecessary polish — operators read docs or use `frankclaw doctor` for validation.
 
 ### ~~Browser Profiles~~ (`openclaw/src/browser/profiles.ts`) — **Done**
 - Named browser profiles with CDP port allocation
@@ -84,9 +84,9 @@ Last updated: 2026-03-14
 - Google function calling parameter validation
 - **FrankClaw status:** Has API key auth for all providers plus GitHub Copilot OAuth device flow. Missing: portal auth (Qwen).
 
-### Secrets Audit (`openclaw/src/secrets/`)
+### ~~Secrets Audit~~ (`openclaw/src/secrets/`) — **Not Needed**
 - Auth profiles scanning and credential matrix
-- **FrankClaw status:** Has `audit` command with 19 AuditCode categories, plaintext .env detection, ref shadowing detection, legacy credential scanning, JSON output. Missing: auth profile credential matrix.
+- **FrankClaw status:** Has `audit` command with 19 AuditCode categories, plaintext .env detection, ref shadowing detection, legacy credential scanning, JSON output. The credential matrix is an OpenClaw-specific concept for their multi-file auth profile system. FrankClaw uses a single config file with env var references — there are no auth profiles to cross-reference.
 
 ### ~~Memory — Batch Embedding Providers~~ (`openclaw/src/memory/`) — **Done**
 - Gemini embedding provider (batchEmbedContents API, text-embedding-004, 768D)
@@ -174,6 +174,6 @@ Last updated: 2026-03-14
 | 9 | iMessage channel | Medium | Low | Open |
 | 10 | ~~Batch embedding (Gemini/Voyage)~~ | ~~Low~~ | ~~Low~~ | **Done** |
 | 11 | ~~Rich markdown rendering~~ | ~~Medium~~ | ~~Low~~ | **Done** |
-| 12 | ~~Secrets audit matrix~~ | ~~Low~~ | ~~Low~~ | **Done** |
-| 13 | Wizard improvements | Low | Low | Open |
+| 12 | ~~Secrets audit matrix~~ | ~~Low~~ | ~~Low~~ | **Not Needed** |
+| 13 | ~~Wizard improvements~~ | ~~Low~~ | ~~Low~~ | **Not Needed** |
 | 14 | ~~Browser profiles~~ | ~~Low~~ | ~~Low~~ | **Done** |

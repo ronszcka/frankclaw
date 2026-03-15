@@ -129,7 +129,10 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 - [x] **Skills System** — Workspace-loaded skill manifests with validation, capability-based
   tool access control, and prompt injection. (`frankclaw-plugin-sdk/src/lib.rs`)
 
-- [x] **ACP (Agent Client Protocol)** — **SKIPPED**: niche interop standard with no real-world adoption.
+- [x] **ACP (Agent Client Protocol)** — JSON-RPC 2.0 over NDJSON (stdin/stdout) with session
+  management (DashMap, 24h TTL, LRU eviction), rate limiting, streaming prompt responses.
+  Methods: initialize, newSession, loadSession, prompt, listTools, callTool.
+  (`frankclaw-gateway/src/acp.rs`, `acp_transport.rs`; CLI `frankclaw acp`)
 
 ### Runtime & Execution
 
@@ -273,7 +276,7 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 
 9. ~~Hooks system~~ ✅
 10. ~~Skills system~~ ✅ (already implemented in plugin-sdk)
-11. ~~ACP protocol~~ — **SKIPPED**: niche interop standard with no real-world adoption yet
+11. ~~ACP protocol~~ ✅ — JSON-RPC 2.0 over NDJSON (`frankclaw acp`)
 12. ~~Bash tools with sandboxing~~ ✅
 
 ### Tier 4 — Operator Experience
@@ -294,8 +297,14 @@ These are the core "brain" features that make OpenClaw's agent loop sophisticate
 - ~~Gmail integration~~ — complex Google Pub/Sub integration for a niche channel
 - ~~Device pairing~~ — Bonjour/mDNS/Tailscale discovery is over-engineered for a self-hosted tool
 - ~~Auto-update~~ — users can use their package manager or pull from git
-- ~~Markdown IR~~ — channel-specific rendering can be added per-channel as needed
+- ~~Markdown IR~~ ✅ — `MarkdownIR` with pulldown-cmark parser and ANSI SGR rendering (`frankclaw-runtime/src/markdown.rs`)
 - ~~i18n~~ — ✅ Implemented: 9 locales via `FRANKCLAW_LANG` (en, pt-BR, pt-PT, es, fr, de, it, ja, ko)
+- ~~Browser profiles~~ ✅ — Named CDP profiles with port allocation (18800-18899), color cycling (`frankclaw-tools/src/browser_profiles.rs`)
+- ~~Batch embedding providers~~ ✅ — Gemini (768D) and Voyage AI (1024D) providers with 100-text batching (`frankclaw-memory/src/embedding.rs`)
+- ~~Plugin management~~ ✅ — Manifest parsing, filesystem discovery, enable/disable lifecycle (`frankclaw-plugin-sdk/src/manifest.rs`, `discovery.rs`, `lifecycle.rs`; CLI `frankclaw plugin`)
+- ~~TUI~~ ✅ — Full-screen ratatui TUI with chat log, input area, status bar, streaming, slash commands (`frankclaw-cli/src/tui.rs`; launched via `frankclaw chat --tui`)
+- ~~Wizard improvements~~ — **Not needed**: current `frankclaw setup` covers the critical path (provider, channel, auth)
+- ~~Secrets audit credential matrix~~ — **Not needed**: FrankClaw uses single config + env vars, not OpenClaw's multi-file auth profile system
 
 ### IronClaw-Derived Features (Adopted)
 

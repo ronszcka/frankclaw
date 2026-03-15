@@ -26,10 +26,16 @@ What's at parity:
 - Job state machine with self-repair for background tasks
 - Event-driven routine triggers (cron, message pattern, system events, manual)
 - Interactive REPL (`frankclaw chat`) with streaming, slash commands, and tab completion
+- Full-screen TUI (`frankclaw chat --tui`) with ratatui: streaming chat log, slash commands, model/session status
+- ACP (Agent Client Protocol): JSON-RPC 2.0 over NDJSON for agent interop (`frankclaw acp`)
+- Plugin management: manifest-based discovery, enable/disable lifecycle (`frankclaw plugin`)
+- Browser profiles: named CDP configurations with port allocation (18800-18899)
+- Batch embedding providers: Gemini (768D) and Voyage AI (1024D) with 100-text batching
+- Rich markdown rendering: CommonMark → IR → ANSI terminal output
 - Operator experience: setup wizard, doctor diagnostics, security audit, daemon management
 
 What's intentionally skipped (low value or over-engineered):
-- TTS, polls, WhatsApp Web (Baileys), Gmail Pub/Sub, ACP protocol, auto-update
+- TTS, polls, WhatsApp Web (Baileys), Gmail Pub/Sub, auto-update
 - 17 long-tail channels (Google Chat, iMessage, IRC, Teams, Matrix, etc.) — can be added via the plugin trait
 
 For full details, see [PARITY_TODO.md](docs/PARITY_TODO.md) and [FEATURE_PLANS.md](docs/FEATURE_PLANS.md).
@@ -58,12 +64,12 @@ For channel setup, see [CHANNEL_SETUP.md](docs/CHANNEL_SETUP.md), `examples/chan
 - **Docker runtime** — `docker compose up -d` starts the gateway, headless Chromium, and Cloudflare tunnel in one command
 - **Prompt templates** — All LLM-facing text lives in editable markdown files, embedded at compile time
 - **Media understanding** — Multi-provider vision (OpenAI, Anthropic, Ollama) and audio transcription (Whisper) with ordered fallback chain, configurable via `understanding` config section
-- **Memory/RAG** — SQLite FTS5 full-text search + cosine vector similarity with hybrid scoring, embedding providers (OpenAI, Ollama) with SHA-256 caching, paragraph-based chunking, automatic file sync
+- **Memory/RAG** — SQLite FTS5 full-text search + cosine vector similarity with hybrid scoring, embedding providers (OpenAI, Ollama, Gemini, Voyage AI) with SHA-256 caching, paragraph-based chunking, automatic file sync
 - **Rich web console** — 8-tab interface (Connect, Chat, Canvas, System, Usage, Agents, Cron, Logs) with dark/light mode, tool approval cards, image paste, usage analytics with CSV export, focus mode, resizable markdown sidebar
 - **Webhook transforms** — JSON path extraction from nested payloads, message templates, per-mapping concurrency limits and fixed-window rate limiting
 - **Media pipeline** — File handling with SSRF protection, filename sanitization, and optional VirusTotal malware scanning
 - **Internationalized CLI** — 9 locales (en, pt-BR, pt-PT, es, fr, de, it, ja, ko) via `FRANKCLAW_LANG`
-- **Plugin system** — Trait-based channel and provider adapters
+- **Plugin system** — Manifest-based plugin discovery, enable/disable lifecycle, CLI management (`frankclaw plugin`)
 - **Zero unsafe code** — `#![forbid(unsafe_code)]` on every crate
 
 ## Architecture
@@ -107,10 +113,10 @@ For channel setup, see [CHANNEL_SETUP.md](docs/CHANNEL_SETUP.md), `examples/chan
 | `frankclaw-channels` | Messaging channel adapters (Web, Telegram, Discord, Slack, Signal, WhatsApp, Email) |
 | `frankclaw-runtime` | Agent runtime, prompt templates, subagent orchestration, context compaction, hooks wiring |
 | `frankclaw-tools` | Tool registry, bash execution (with optional ai-jail sandbox), browser tools, MCP client, audio transcription |
-| `frankclaw-memory` | SQLite FTS5 + vector memory store with embedding providers (OpenAI, Ollama), caching, file sync |
+| `frankclaw-memory` | SQLite FTS5 + vector memory store with embedding providers (OpenAI, Ollama, Gemini, Voyage AI), caching, file sync |
 | `frankclaw-cron` | Scheduled jobs with event triggers, job state machine, and self-repair |
 | `frankclaw-media` | File storage with SSRF-safe HTTP fetcher, optional VirusTotal malware scanning, multi-provider media understanding (vision + transcription) |
-| `frankclaw-plugin-sdk` | Plugin registry for extending channels and tools |
+| `frankclaw-plugin-sdk` | Plugin registry with manifest parsing, filesystem discovery, enable/disable lifecycle |
 | `frankclaw-cli` | CLI binary with all subcommands |
 
 ## Requirements
@@ -327,6 +333,12 @@ FRANKCLAW_BROWSER_DEVTOOLS_URL=http://127.0.0.1:9223/ \
 
 ```
 frankclaw chat            Interactive REPL chat (streaming, slash commands, tab completion)
+frankclaw chat --tui      Full-screen TUI mode (ratatui)
+frankclaw acp             Start ACP server (JSON-RPC 2.0 over NDJSON stdin/stdout)
+frankclaw plugin list     List discovered plugins
+frankclaw plugin enable   Enable a plugin by ID
+frankclaw plugin disable  Disable a plugin by ID
+frankclaw plugin info     Show plugin details
 frankclaw gateway         Start the gateway server
 frankclaw gen-token       Generate a 256-bit auth token
 frankclaw hash-password   Hash a password with Argon2id for config
@@ -686,6 +698,12 @@ See [PARITY_TODO.md](docs/PARITY_TODO.md) for the current parity tracker.
 - [x] Rich web console (8 tabs, dark mode, tool approval, analytics)
 - [x] Webhook transforms (JSON path, templates, rate limiting)
 - [x] Hook lifecycle wiring (message + tool events)
+- [x] Full-screen TUI with ratatui (`frankclaw chat --tui`)
+- [x] ACP protocol (JSON-RPC 2.0 over NDJSON)
+- [x] Plugin management with manifest discovery and lifecycle
+- [x] Browser profiles with CDP port allocation
+- [x] Batch embedding providers (Gemini, Voyage AI)
+- [x] Rich markdown rendering (CommonMark → IR → ANSI)
 - [ ] Long-tail attachment/media edge cases on supported channels
 - [ ] Companion nodes and apps
 - [ ] Voice
