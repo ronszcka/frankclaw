@@ -54,6 +54,7 @@ pub struct AcpServer {
     runtime: Arc<Runtime>,
     sessions: DashMap<String, AcpSession>,
     options: AcpServerOptions,
+    canvas: Arc<crate::canvas::CanvasStore>,
     // Simple rate limiter: (window_start, count).
     rate_window: std::sync::Mutex<(Instant, u32)>,
 }
@@ -64,6 +65,7 @@ impl AcpServer {
             runtime,
             sessions: DashMap::new(),
             options,
+            canvas: crate::canvas::CanvasStore::new(),
             rate_window: std::sync::Mutex::new((Instant::now(), 0)),
         }
     }
@@ -221,7 +223,7 @@ impl AcpServer {
             thinking_budget: None,
             channel_id: None,
             channel_capabilities: None,
-            canvas: None,
+            canvas: Some(self.canvas.clone()),
             cancel_token: None,
             approval_tx: None,
         };

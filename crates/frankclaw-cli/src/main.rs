@@ -707,7 +707,7 @@ async fn main() -> anyhow::Result<()> {
                     thinking_budget: None,
                     channel_id: None,
                     channel_capabilities: None,
-                    canvas: None,
+                    canvas: Some(frankclaw_gateway::canvas::CanvasStore::new()),
                     cancel_token: None,
                     approval_tx: None,
                 })

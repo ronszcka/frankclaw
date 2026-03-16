@@ -243,7 +243,7 @@ async fn handle_non_streaming(
             thinking_budget: None,
             channel_id: None,
             channel_capabilities: None,
-            canvas: None,
+            canvas: Some(state.canvas.clone()),
             cancel_token: Some(cancel_token),
             approval_tx: None,
         })
@@ -308,7 +308,7 @@ async fn handle_streaming(
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
-                canvas: None,
+                canvas: Some(state.canvas.clone()),
                 cancel_token: Some(cancel_token),
                 approval_tx: None,
             })

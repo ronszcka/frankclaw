@@ -292,7 +292,7 @@ pub async fn chat_send(
             thinking_budget: None,
             channel_id: None,
             channel_capabilities: None,
-            canvas: None,
+            canvas: Some(state.canvas.clone()),
             cancel_token: Some(cancel_token),
             approval_tx: Some(approval_tx),
         })
@@ -1913,7 +1913,7 @@ pub async fn cron_run(
                 thinking_budget: None,
                 channel_id: None,
                 channel_capabilities: None,
-                canvas: None,
+                canvas: Some(state2.canvas.clone()),
                 cancel_token: None,
                 approval_tx: None,
             })
